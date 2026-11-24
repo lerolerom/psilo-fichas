@@ -104,6 +104,14 @@ export function proximoToque(
   return new Date(base.getTime() + D);
 }
 
+/** ¿Es un momento válido para un seguimiento? (lunes a viernes sin feriados, dentro de alguna franja) */
+export function enFranjaSeguimiento(d: Date, o: { tz: string; feriados: Set<string>; franjas: [number, number][] }): boolean {
+  const p = partesLocales(d, o.tz);
+  if (esFinDeSemana(d, o.tz) || o.feriados.has(p.fecha)) return false;
+  const m = p.hora * 60 + p.minuto;
+  return o.franjas.some(([a, b]) => m >= a && m < b);
+}
+
 /** Tiempo de "lectura" antes de contestar: al azar entre min y max, un poco más si el mensaje es largo. */
 export function esperaLectura(largoTexto: number, o: { min: number; max: number; azar: Azar }): number {
   const extra = Math.min(2, largoTexto / 300); // hasta 2 minutos más por mensajes largos

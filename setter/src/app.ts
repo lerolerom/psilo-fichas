@@ -54,7 +54,14 @@ export function crearApp(cfg: Config, store: Store, motor: Motor) {
       for (const ev of eventos) {
         if (ev.tipo === "leadgen") {
           if (!cfg.META_PAGE_ACCESS_TOKEN) continue;
-          const l = await leerLeadgen(ev.leadgenId, cfg.META_PAGE_ACCESS_TOKEN, cfg.WA_GRAPH_VERSION).catch(() => null);
+          const l = await leerLeadgen(ev.leadgenId, cfg.META_PAGE_ACCESS_TOKEN, cfg.WA_GRAPH_VERSION).catch((e) => {
+            store.log(null, "leadgen_error", `${ev.leadgenId}: ${String(e)}`);
+            return null;
+          });
+          if (!l) {
+            store.log(null, "leadgen_sin_datos", ev.leadgenId);
+            await motor.notificar(`Llegó un lead de formulario (ID ${ev.leadgenId}) que no se pudo leer. Revísalo en el Leads Center.`);
+          }
           if (l) {
             await motor.ingresarLead({
               telefono: l.telefono,

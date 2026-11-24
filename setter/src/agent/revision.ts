@@ -67,7 +67,7 @@ export function revisarMensaje(texto: string, estado: EstadoRevision, opts: { pr
   if (estado.precioEvaluacionDado && /\$\s?490/.test(t) && /\$\s?40\b/.test(t)) {
     p.push({ grave: false, motivo: 'Ya se dio la evaluación de $40: ahora solo "La inversión del programa va desde $490.", sin repetir los $40.' });
   }
-  if (/\b\d{9,}\b/.test(t.replace(/\s/g, "")) && /cuenta|ahorros|produbanco|transferencia/i.test(t)) {
+  if (/(?<!\d)\d{9,}(?!\d)/.test(t.replace(/[\s-]/g, "")) && /cuenta|ahorros|produbanco|transferencia/i.test(t)) {
     p.push({ grave: false, motivo: "No escribas datos bancarios: usa enviar_datos_pago." });
   }
   if (/calendar\.app\.google|calendly|agenda(r)? (tu|la) (cita|evaluaci[oó]n) aqu[ií]/i.test(plano)) {

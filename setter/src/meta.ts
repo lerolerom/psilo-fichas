@@ -43,7 +43,8 @@ export class MetaConversiones implements Conversiones {
         event_time: eventTime,
         action_source: "system_generated",
         custom_data: { event_source: "crm", lead_event_source: this.o.nombreCrm },
-        user_data: { lead_id: Number(lead.leadgen_id), ph: [hashTelefono(lead.telefono)] },
+        // Como texto: los ID de Meta pueden pasar el límite de precisión de los números en JavaScript.
+        user_data: { lead_id: lead.leadgen_id, ph: [hashTelefono(lead.telefono)] },
       };
     }
     if (lead.ctwa_clid) {

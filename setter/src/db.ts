@@ -118,6 +118,7 @@ export interface Escalacion {
   estado: "pendiente" | "enviada" | "editada" | "ignorada";
   creado: string;
   avisada: number; // 1 = ya se le avisó a Mario (inmediato o en el reporte diario)
+  accion: string | null; // JSON con lo que se ejecuta al aprobar (cuenta, comprobante, mensajes)
 }
 
 const SCHEMA = `
@@ -239,6 +240,7 @@ export class Store {
       ["leads", "ctwa_clid", "TEXT"],
       ["mensajes", "tipo_envio", "TEXT"],
       ["escalaciones", "avisada", "INTEGER NOT NULL DEFAULT 0"],
+      ["escalaciones", "accion", "TEXT"],
       ["mensajes", "media_path", "TEXT"],
       ["mensajes", "responde_a", "TEXT"], // ISO del mensaje del lead al que responde (latencia)
     ];
@@ -365,9 +367,18 @@ export class Store {
     return this.db.prepare("SELECT * FROM leads WHERE cita IS NOT NULL").all() as Lead[];
   }
 
+  mensajesDespuesDe(telefono: string, id: number): Mensaje[] {
+    return this.db.prepare("SELECT * FROM mensajes WHERE telefono = ? AND id > ? ORDER BY id").all(telefono, id) as Mensaje[];
+  }
+
+  existeMensaje(waId: string): boolean {
+    return !!this.db.prepare("SELECT 1 FROM mensajes WHERE wa_id = ?").get(waId);
+  }
+
+  /** Últimos mensajes en orden cronológico (por hora del mensaje: el historial sincronizado llega tarde). */
   mensajes(telefono: string, limite = 80): Mensaje[] {
     const filas = this.db
-      .prepare("SELECT * FROM mensajes WHERE telefono = ? ORDER BY id DESC LIMIT ?")
+      .prepare("SELECT * FROM mensajes WHERE telefono = ? ORDER BY ts DESC, id DESC LIMIT ?")
       .all(telefono, limite) as Mensaje[];
     return filas.reverse();
   }
@@ -381,13 +392,13 @@ export class Store {
   }
 
   // ---------- escalaciones ----------
-  crearEscalacion(e: Omit<Escalacion, "id" | "estado" | "creado" | "avisada">): Escalacion {
+  crearEscalacion(e: Omit<Escalacion, "id" | "estado" | "creado" | "avisada" | "accion"> & { accion?: string | null }): Escalacion {
     const r = this.db
       .prepare(
-        `INSERT INTO escalaciones (telefono, categoria, motivo, propuesta, creado)
-         VALUES (@telefono, @categoria, @motivo, @propuesta, @creado)`,
+        `INSERT INTO escalaciones (telefono, categoria, motivo, propuesta, accion, creado)
+         VALUES (@telefono, @categoria, @motivo, @propuesta, @accion, @creado)`,
       )
-      .run({ ...e, creado: new Date().toISOString() });
+      .run({ accion: null, ...e, creado: new Date().toISOString() });
     return this.escalacion(Number(r.lastInsertRowid))!;
   }
 

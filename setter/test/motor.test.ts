@@ -75,8 +75,8 @@ describe("Mario escribe desde la app", () => {
 
   it("si el lead contesta enseguida a Mario, se le da margen a Mario antes de que conteste el agente", async () => {
     const t = montar({ decisiones: [decision({ mensajes: [msg("ok")] })], env: { LECTURA_MIN_MINUTOS: "1", LECTURA_MAX_MINUTOS: "2" } });
+    t.store.crearLead(LEAD, { dueno: "MARIO" });
     await t.eco(LEAD, "Hola, soy Mario", "e1");
-    t.store.actualizar(LEAD, { pausado: 0, motivo_pausa: null });
     await t.entrante(LEAD, "hola Mario", "w1");
     t.avanzar(3 * MIN);
     await t.motor.tick();
@@ -274,6 +274,7 @@ describe("seguimientos", () => {
 
   it("no usa la plantilla de primer mensaje si el chat ya tenía conversación", async () => {
     const t = montar();
+    t.store.crearLead(LEAD, { dueno: "MARIO" });
     await t.eco(LEAD, "Hola, soy Mario", "e1");
     t.store.actualizar(LEAD, { pausado: 0, motivo_pausa: null, paso: "nuevo", proximo_toque: t.ahora.toISOString() });
     await t.motor.tick();
@@ -308,12 +309,14 @@ describe("etapas y comandos", () => {
     expect(t.store.lead(LEAD)!.etapa).toBe("Qualified");
   });
 
-  it("DUEÑO reasigna y libera chats iniciados desde la app", async () => {
+  it("DUEÑO reasigna y libera chats iniciados desde la app (que quedan en el reporte para Mario)", async () => {
     const t = montar();
     await t.eco(LEAD, "Hola", "e1");
     expect(t.store.lead(LEAD)!.pausado).toBe(1);
+    expect(t.store.escalacionesPendientes()[0].categoria).toBe("asignar_dueno");
     await t.motor.comandoAdmin(MARIO, "DUEÑO 0991234567 DANI");
     expect(t.store.lead(LEAD)!.dueno).toBe("DANI");
     expect(t.store.lead(LEAD)!.pausado).toBe(0);
+    expect(t.store.escalacionesPendientes()).toHaveLength(0);
   });
 });

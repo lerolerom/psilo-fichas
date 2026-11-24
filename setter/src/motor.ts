@@ -15,6 +15,7 @@ import {
   type Azar,
   DIA,
   desdeLocal,
+  enFranjaSeguimiento,
   diasDesde,
   esperaLectura,
   formatoCita,
@@ -25,6 +26,7 @@ import {
 } from "./tiempo.js";
 
 export interface CalendarioEscritura {
+  libre?(inicioIso: string, minutos: number): Promise<boolean>;
   crearEvaluacion(
     inicioIso: string,
     titulo: string,
@@ -61,6 +63,8 @@ type Eco = Extract<EventoWA, { tipo: "eco" }>;
 type Modo = "respuesta" | "seguimiento" | "recordatorio";
 
 const SIN_SEGUIMIENTO = new Set(["Converted", "Agendo sesion Evaluacion"]);
+/** Separa los mensajes de una propuesta (no aparece dentro de un mensaje normal). */
+const SEPARADOR = "\n---\n";
 const MEDIA_VISIBLE = /^(image\/(jpeg|png|webp|gif)|application\/pdf)$/;
 
 export class Motor {
@@ -109,7 +113,13 @@ export class Motor {
       try {
         if (ev.tipo === "entrante") await this.entrante(ev);
         else if (ev.tipo === "eco") await this.eco(ev);
-        else if (ev.tipo === "estado" && ev.estado === "failed") this.store.log(ev.para, "envio_fallido", ev.error);
+        else if (ev.tipo === "estado" && ev.estado === "failed") {
+          this.store.log(ev.para, "envio_fallido", ev.error);
+          // Un mensaje a un lead que no llegó: Mario debe saberlo (por ejemplo, ventana de 24 h cerrada).
+          if (!this.cfg.adminNumeros.includes(ev.para)) {
+            await this.notificar(`No se pudo entregar un mensaje a +${ev.para} (${ev.error ?? "error de WhatsApp"}). Revisa el chat y escríbele desde la app si hace falta.`);
+          }
+        }
       } catch (e) {
         console.error("Error procesando evento", ev, e);
         this.store.log(null, "error", String(e));
@@ -150,16 +160,22 @@ export class Motor {
       this.store.actualizar(ev.de, { ctwa_clid: ev.referral.ctwa_clid, anuncio: lead.anuncio ?? ev.referral.headline ?? null });
     }
 
+    if (this.store.existeMensaje(ev.waId)) return; // reintento de Meta
+
+    // El audio se transcribe antes de guardarlo, para que ningún turno lo vea vacío.
+    let texto = ev.texto;
+    if (ev.clase === "audio" && ev.mediaId && !ev.historial) texto = (await this.transcribir(ev.mediaId)) ?? ev.texto;
+
     const nuevo = this.store.guardarMensaje({
       telefono: ev.de,
       direccion: "in",
       tipo: ev.clase,
-      texto: ev.texto,
+      texto,
       wa_id: ev.waId,
       autor: "lead",
       ts: ev.ts.toISOString(),
     });
-    if (!nuevo) return; // reintento de Meta
+    if (!nuevo) return;
 
     // Historial sincronizado al activar la coexistencia: solo se guarda.
     if (ev.historial) {
@@ -167,16 +183,8 @@ export class Motor {
       return;
     }
 
-    let texto = ev.texto;
-    if (ev.clase === "audio" && ev.mediaId) {
-      const t = await this.transcribir(ev.mediaId);
-      if (t) {
-        texto = t;
-        this.store.ponerTexto(ev.waId, t);
-      }
-    } else if (ev.mediaId && this.wa.descargarMedia) {
-      await this.guardarAdjunto(ev.waId, ev.mediaId);
-    }
+    if (ev.clase !== "audio" && ev.mediaId && this.wa.descargarMedia) await this.guardarAdjunto(ev.waId, ev.mediaId);
+    lead = this.store.lead(ev.de)!; // el estado pudo cambiar durante las descargas
     if (ev.formulario) {
       this.store.actualizar(ev.de, { formulario: [lead.formulario, ev.formulario].filter(Boolean).join("\n"), origen: lead.origen ?? "formulario" });
     }
@@ -190,7 +198,8 @@ export class Motor {
       return;
     }
 
-    const cambios: Partial<Lead> = { ultimo_in: ahora.toISOString(), intentos_sin_respuesta: 0, proximo_toque: null };
+    // Si había dicho que no y vuelve a escribir, la conversación se retoma.
+    const cambios: Partial<Lead> = { ultimo_in: ahora.toISOString(), intentos_sin_respuesta: 0, proximo_toque: null, dijo_no: 0 };
     if (lead.paso === "contactado" || lead.paso === "nuevo") cambios.paso = "abrio";
 
     // Riesgo: antes que cualquier otra cosa y a cualquier hora, sin pasar por el agente de ventas.
@@ -213,16 +222,19 @@ export class Motor {
     if (riesgo) {
       this.store.actualizar(ev.de, { ...cambios, pausado: 1, motivo_pausa: `riesgo ${riesgo}`, pendiente_desde: null });
       const lead2 = this.store.lead(ev.de)!;
+      let contencion = "No se respondió nada.";
       if (riesgo === "alto" && this.cfg.MODO !== "pausado") {
-        // Riesgo: sin tiempo de lectura, se contesta de inmediato.
-        await this.enviarTexto(lead2, mensajeContencion(lead2.nombre), { autor: "sistema", tipo: "otro", respondeA: ev.ts.toISOString() });
+        // Riesgo: sin tiempo de lectura, se contesta de inmediato. Si el envío falla, Mario igual se entera.
+        try {
+          await this.enviarTexto(lead2, mensajeContencion(lead2.nombre), { autor: "sistema", tipo: "otro", respondeA: ev.ts.toISOString() });
+          contencion = "Se envió el mensaje de contención con 171 opción 6 y 911.";
+        } catch (e) {
+          contencion = `NO se pudo enviar el mensaje de contención (${String(e).slice(0, 120)}): escríbele tú ya.`;
+        }
       }
       await this.escalar(lead2, {
         categoria: "riesgo",
-        motivo:
-          riesgo === "alto"
-            ? `Posible riesgo de autolesión. Se envió mensaje de contención con 171 opción 6 y 911. Mensaje${ev.clase === "audio" ? " (audio transcrito)" : ""}: "${texto}"`
-            : `Señal ambigua de riesgo. No se respondió nada. Mensaje${ev.clase === "audio" ? " (audio transcrito)" : ""}: "${texto}"`,
+        motivo: `${riesgo === "alto" ? "Posible riesgo de autolesión" : "Señal ambigua de riesgo"}. ${contencion} Mensaje${ev.clase === "audio" ? " (audio transcrito)" : ""}: "${texto}"`,
         propuesta: null,
       });
       return;
@@ -287,13 +299,11 @@ export class Motor {
   private async eco(ev: Eco): Promise<void> {
     const ahora = this.reloj();
     let lead = this.store.lead(ev.para);
+    const iniciadoDesdeApp = !lead && !ev.historial;
     if (!lead) {
-      // Chat iniciado desde la app: no sabemos de quién es. Por seguridad, el agente no lo toca.
+      // Chat iniciado desde la app: no sabemos de quién es. Por seguridad, el agente no lo toca hasta que Mario diga.
       lead = this.store.crearLead(ev.para, { dueno: this.cfg.DUENO_POR_DEFECTO, origen: "app" }, ahora);
-      this.store.actualizar(ev.para, {
-        pausado: ev.historial ? 0 : 1,
-        motivo_pausa: ev.historial ? null : "chat iniciado desde la app: asignar dueño con DUEÑO",
-      });
+      if (iniciadoDesdeApp) this.store.actualizar(ev.para, { pausado: 1, motivo_pausa: "chat iniciado desde la app: asignar dueño con DUEÑO" });
     }
     const primeroNuestro = this.nuestros(ev.para).length === 0;
     const nuevo = this.store.guardarMensaje({
@@ -310,13 +320,19 @@ export class Motor {
       this.store.actualizar(ev.para, { historial_incompleto: 1 });
       return;
     }
+    if (iniciadoDesdeApp) {
+      await this.escalar(this.store.lead(ev.para)!, {
+        categoria: "asignar_dueno",
+        motivo: `Chat nuevo iniciado desde la app ("${resumir(ev.texto, 80)}"). El agente no lo atiende hasta que le asignes dueño: DUEÑO ${ev.para} MARIO|DANI|VERO.`,
+        propuesta: null,
+      });
+      return;
+    }
     // Mario contestó desde la app: ese mensaje queda en la conversación (el agente lo lee y sigue desde ahí).
     // Lo pendiente se da por atendido y, si el lead responde enseguida, se le da a Mario unos minutos de margen.
     void primeroNuestro;
-    // ¿Era el seguimiento de hoy que dejó el sistema para las rondas de Chrome? Cuenta como un toque.
-    const hoy = partesLocales(ahora, this.cfg.TZ_NEGOCIO).fecha;
-    const deChrome = this.store.listaChrome(hoy).find((x) => x.telefono === ev.para && x.estado === "pendiente");
-    if (deChrome) this.store.db.prepare("UPDATE para_chrome SET estado = 'enviado' WHERE id = ?").run(deChrome.id);
+    // ¿Era un seguimiento que dejó el sistema para las rondas de Chrome? (ya contado como toque)
+    this.store.db.prepare("UPDATE para_chrome SET estado = 'enviado' WHERE telefono = ? AND estado = 'pendiente'").run(ev.para);
     const l = this.store.lead(ev.para)!;
     this.store.actualizar(ev.para, {
       humano_hasta: new Date(ahora.getTime() + this.cfg.ESPERA_TRAS_MARIO_MINUTOS * 60_000).toISOString(),
@@ -392,7 +408,7 @@ export class Motor {
 
   /** Envía a Meta los cambios de etapa encolados (con reintentos). */
   private async enviarEventosMeta(): Promise<void> {
-    if (!this.conversiones) return;
+    if (!this.conversiones || this.sombra) return;
     for (const e of this.store.eventosMetaPendientes()) {
       const lead = this.store.lead(e.telefono);
       if (!lead) {
@@ -459,7 +475,7 @@ export class Motor {
     };
   }
 
-  private async turno(tel: string, modo: Modo, opciones?: { destino?: "chrome" }): Promise<void> {
+  private async turno(tel: string, modo: Modo, opciones?: { destino?: "chrome"; cuando?: "hoy" | "mañana" }): Promise<void> {
     const lead = this.store.lead(tel);
     if (!lead || lead.pausado || lead.dueno === "VERO") {
       if (lead) this.store.actualizar(tel, { pendiente_desde: null });
@@ -473,7 +489,7 @@ export class Motor {
       if (ultimoIn >= 0) mensajes = mensajes.slice(0, ultimoIn + 1);
     }
     const h = hechos(lead, mensajes, this.cfg.VIDEO_EDUCATIVO_URL);
-    const texto = armarContexto(lead, mensajes, { modo, ahora, tz: this.cfg.TZ_NEGOCIO, material: this.material(lead) });
+    const texto = armarContexto(lead, mensajes, { modo, ahora, tz: this.cfg.TZ_NEGOCIO, material: this.material(lead), cuando: opciones?.cuando });
 
     // Adjuntos del lead desde nuestro último mensaje (comprobantes): el agente los ve.
     const adjuntos: { mediaType: string; base64: string }[] = [];
@@ -487,12 +503,30 @@ export class Motor {
     }
 
     const respondeA = modo === "respuesta" ? (lead.pendiente_desde ?? null) : null;
+    // Foto del chat antes de decidir: si mientras tanto el lead escribe o Mario contesta, la decisión ya no vale.
+    const ultimoIdAntes = this.ultimoIdMensaje(tel);
+    // Un seguimiento cuenta como toque aunque el agente decida no enviar nada (si no, se reintentaría en cada ciclo).
+    if (modo === "seguimiento") this.avanzarToque(tel, ahora);
     const d = await this.agente.decidir({
       texto,
       adjuntos,
       estado: { chatNuevo: h.chatNuevo, preguntasProfundizar: lead.preguntas_profundizar, precioEvaluacionDado: h.precioEvaluacionDado },
+      validarCita: (fechaHora) => this.validarCita(tel, fechaHora),
     });
     this.store.log(tel, "decision", JSON.stringify(d));
+
+    const nuevos = this.store.mensajesDespuesDe(tel, ultimoIdAntes);
+    if (nuevos.some((m) => m.direccion === "in")) {
+      // El lead escribió mientras el agente decidía: se descarta y se vuelve a leer todo en un minuto.
+      this.store.log(tel, "decision_descartada", "el lead escribió durante la decisión");
+      this.store.actualizar(tel, { pendiente_desde: this.store.lead(tel)!.pendiente_desde ?? ahora.toISOString(), responder_despues: new Date(this.reloj().getTime() + 60_000).toISOString() });
+      return;
+    }
+    if (!this.sombra && nuevos.some((m) => m.direccion === "eco" || m.direccion === "out")) {
+      // Mario (u otro proceso) contestó mientras el agente decidía: no se duplica.
+      this.store.log(tel, "decision_descartada", "alguien del equipo contestó durante la decisión");
+      return;
+    }
     this.store.actualizar(tel, { pendiente_desde: null, responder_despues: null });
     if (this.sombra) {
       this.store.guardarSombra({
@@ -507,14 +541,48 @@ export class Motor {
       for (const x of d.datos) {
         if (x.campo === "nombre" && !lead.nombre) this.store.actualizar(tel, { nombre: x.valor });
       }
-      if (modo !== "respuesta") {
-        const l = this.store.lead(tel)!;
-        this.store.actualizar(tel, { intentos_sin_respuesta: l.intentos_sin_respuesta + 1, proximo_toque: this.calcularProximoToque({ ...l, intentos_sin_respuesta: l.intentos_sin_respuesta + 1 }, ahora) });
-      }
       return;
     }
     if (opciones?.destino === "chrome") return this.dejarParaChrome(lead, d, ahora);
     await this.aplicar(lead, d, modo, respondeA);
+  }
+
+  private ultimoIdMensaje(tel: string): number {
+    const r = this.store.db.prepare("SELECT COALESCE(MAX(id), 0) AS id FROM mensajes WHERE telefono = ?").get(tel) as { id: number };
+    return r.id;
+  }
+
+  /** Suma un toque y agenda el siguiente (se llama antes de decidir, así nunca queda en un bucle). */
+  private avanzarToque(tel: string, ahora: Date): void {
+    const l = this.store.lead(tel)!;
+    const intentos = l.intentos_sin_respuesta + 1;
+    this.store.actualizar(tel, {
+      intentos_sin_respuesta: intentos,
+      proximo_toque: this.calcularProximoToque({ ...l, intentos_sin_respuesta: intentos }, ahora),
+    });
+  }
+
+  /** Reglas de una cita de evaluación: futura, entre semana, sin feriados, dentro del horario y sin choque con otra cita. */
+  validarCita(tel: string, fechaHora: string): string | null {
+    const inicio = desdeLocal(fechaHora);
+    const fin = new Date(inicio.getTime() + this.cfg.DURACION_EVALUACION_MIN * 60_000);
+    const ahora = this.reloj();
+    if (inicio.getTime() < ahora.getTime() + 60 * 60_000) return "Esa hora ya pasó o es demasiado pronto: ofrece otra.";
+    const fecha = fechaHora.slice(0, 10);
+    const ref = new Date(`${fecha}T12:00:00-05:00`);
+    const dia = partesLocales(ref, this.cfg.TZ_NEGOCIO).diaSemana;
+    if (dia === "Sat" || dia === "Sun") return "Es fin de semana: la evaluación es solo entre semana.";
+    if (this.cfg.feriados.has(fecha)) return "Es feriado: no se atiende. Ofrece otro día.";
+    const [a, b] = this.cfg.horarioEvaluaciones;
+    const minIni = Number(fechaHora.slice(11, 13)) * 60 + Number(fechaHora.slice(14, 16));
+    if (minIni < a || minIni + this.cfg.DURACION_EVALUACION_MIN > b) {
+      return `Fuera del horario de evaluaciones (la sesión de ${this.cfg.DURACION_EVALUACION_MIN} min debe empezar después de las ${String(a / 60 | 0).padStart(2, "0")}:${String(a % 60).padStart(2, "0")} y terminar antes de las ${String(b / 60 | 0).padStart(2, "0")}:${String(b % 60).padStart(2, "0")}).`;
+    }
+    const choque = this.store
+      .leadsConCita()
+      .find((l) => l.telefono !== tel && l.etapa !== "Lost" && new Date(l.cita!) < fin && new Date(new Date(l.cita!).getTime() + this.cfg.DURACION_EVALUACION_MIN * 60_000) > inicio);
+    if (choque) return "Esa hora ya está reservada para otra persona (pendiente de pago). Ofrece otra hora libre.";
+    return null;
   }
 
   /** Seguimiento fuera de la ventana de 24 h: el agente lo redacta y lo envían las rondas de Chrome. */
@@ -524,41 +592,40 @@ export class Motor {
       await this.escalar(lead, { categoria: d.escalacion.categoria, motivo: d.escalacion.motivo, propuesta: d.escalacion.propuesta || null });
       return;
     }
+    this.aplicarDatos(tel, d);
     const texto = d.mensajes.map((m) => m.texto).join("\n\n");
     const l = this.store.lead(tel)!;
-    const intentos = l.intentos_sin_respuesta + 1;
     if (texto) {
       const motivo = `${l.paso}, ${diasDesde(l.ultimo_in ?? l.creado, ahora)} días sin respuesta`;
       this.store.agregarParaChrome(tel, partesLocales(ahora, this.cfg.TZ_NEGOCIO).fecha, texto, motivo);
     }
-    this.store.actualizar(tel, {
-      intentos_sin_respuesta: intentos,
-      paso: l.paso === "nuevo" ? "contactado" : l.paso,
-      proximo_toque: this.calcularProximoToque({ ...l, intentos_sin_respuesta: intentos }, ahora),
-    });
+    if (l.paso === "nuevo") this.store.actualizar(tel, { paso: "contactado" });
   }
 
-  private async aplicar(lead: Lead, d: Decision, modo: Modo, respondeA: string | null): Promise<void> {
-    const tel = lead.telefono;
-    const ahora = this.reloj();
-
+  /** Datos, etapa y paso que decidió el agente. */
+  private aplicarDatos(tel: string, d: Decision): void {
     for (const x of d.datos) {
       const l = this.store.lead(tel)!;
       if (x.campo === "nombre") this.store.actualizar(tel, { nombre: x.valor });
       else if (x.campo === "ciudad") this.store.actualizar(tel, { ciudad: x.valor });
       else if (x.campo === "nota") this.store.actualizar(tel, { notas: [l.notas, x.valor].filter(Boolean).join(" | ") });
       else if (x.campo === "aprendizaje") this.store.log(tel, "aprendizaje", x.valor);
-      else if (x.campo === "no_explicito") this.store.actualizar(tel, { dijo_no: 1 });
+      else if (x.campo === "no_explicito") this.store.actualizar(tel, { dijo_no: 1, proximo_toque: null });
       else if (x.campo === "fecha_acordada") this.store.actualizar(tel, { fecha_acordada: x.valor });
       else if (x.campo === "oferta_dani") {
         const v = { ofrecida: 1, aceptada: 2, rechazada: 3 }[x.valor as "ofrecida"] ?? 1;
-        this.store.actualizar(tel, { oferta_dani: v, ...(v === 3 ? { dijo_no: 1 } : {}) });
+        this.store.actualizar(tel, { oferta_dani: v, ...(v === 3 ? { dijo_no: 1, proximo_toque: null } : {}) });
       }
     }
     const actual = this.store.lead(tel)!;
     const etapa = etapaFinal(actual.etapa, d.etapa);
     if (etapa !== actual.etapa) this.store.actualizar(tel, { etapa });
     if (d.paso) this.store.actualizar(tel, { paso: d.paso });
+  }
+
+  private async aplicar(lead: Lead, d: Decision, modo: Modo, respondeA: string | null): Promise<void> {
+    const tel = lead.telefono;
+    this.aplicarDatos(tel, d);
 
     if (d.rechazo) {
       await this.escalar(this.store.lead(tel)!, { categoria: "otro", motivo: "El modelo no pudo generar una respuesta para este chat. Revísalo tú.", propuesta: null });
@@ -575,22 +642,48 @@ export class Motor {
       if (!d.escalacion.enviarTambien) return; // queda sin responder y sin leer, como pidió Mario
     }
 
-    if (d.noResponder && !d.mensajes.length && !d.datosPago && !d.comprobante) {
+    const hayAccion = d.mensajes.length > 0 || !!d.datosPago || !!d.comprobante;
+    if (d.noResponder && !hayAccion) {
       this.marcarLeidoUltimo(tel);
       return;
     }
-
-    // Modo aprobación: todo pasa por Mario.
-    if (this.cfg.MODO === "aprobacion" && d.mensajes.length) {
-      const propuesta = d.mensajes.map((m) => m.texto).join("\n\n");
-      await this.escalar(this.store.lead(tel)!, { categoria: "aprobacion", motivo: "Respuesta para aprobar", propuesta });
+    if (!hayAccion && !d.escalacion) {
+      // El agente no decidió nada: el lead no puede quedar sin respuesta y sin que nadie lo sepa.
+      if (modo === "respuesta") {
+        await this.escalar(this.store.lead(tel)!, { categoria: "otro", motivo: "El agente no logró decidir una respuesta para este chat. Revísalo tú.", propuesta: null });
+      }
       return;
     }
 
+    // Modo aprobación: todo pasa por Mario, incluidas la cuenta y el registro del comprobante.
+    if (this.cfg.MODO === "aprobacion" && hayAccion) {
+      const extra = [d.datosPago ? `[enviar cuenta y formulario: ${d.datosPago.fechaHora}, ${d.datosPago.modalidad}]` : "", d.comprobante ? `[registrar comprobante: ${d.comprobante}]` : ""].filter(Boolean);
+      const propuesta = [...d.mensajes.map((m) => m.texto), ...extra].join(SEPARADOR);
+      await this.escalar(this.store.lead(tel)!, {
+        categoria: "aprobacion",
+        motivo: "Respuesta para aprobar",
+        propuesta,
+        accion: JSON.stringify({ mensajes: d.mensajes, datosPago: d.datosPago, comprobante: d.comprobante, respondeA }),
+      });
+      return;
+    }
+
+    await this.ejecutar(tel, d, modo, respondeA);
+  }
+
+  /** Envía lo decidido (mensajes, cuenta para el pago, registro del comprobante) y agenda el próximo toque. */
+  private async ejecutar(
+    tel: string,
+    d: Pick<Decision, "mensajes" | "datosPago" | "comprobante">,
+    modo: Modo,
+    respondeA: string | null,
+    autor = "agente",
+  ): Promise<void> {
+    const ahora = this.reloj();
     let enviados = 0;
     for (const m of d.mensajes) {
       if (enviados > 0) await this.dormir(15_000 + this.azar() * 30_000); // pausa entre dos mensajes seguidos
-      await this.enviarTexto(this.store.lead(tel)!, m.texto, { autor: "agente", tipo: m.tipo, respondeA, humano: true });
+      await this.enviarTexto(this.store.lead(tel)!, m.texto, { autor, tipo: m.tipo, respondeA, humano: true });
       const l = this.store.lead(tel)!;
       const cambios: Partial<Lead> = {};
       if (m.profundizar) cambios.preguntas_profundizar = l.preguntas_profundizar + 1;
@@ -612,10 +705,12 @@ export class Motor {
     if (!enviados) return;
 
     const l = this.store.lead(tel)!;
-    const intentos = modo === "respuesta" ? 0 : l.intentos_sin_respuesta + 1;
-    const cambios: Partial<Lead> = { intentos_sin_respuesta: intentos };
+    const cambios: Partial<Lead> = {};
     if (l.paso === "nuevo") cambios.paso = "contactado";
-    cambios.proximo_toque = this.calcularProximoToque({ ...l, ...cambios } as Lead, ahora);
+    if (modo === "respuesta") {
+      cambios.intentos_sin_respuesta = 0;
+      cambios.proximo_toque = this.calcularProximoToque({ ...l, ...cambios } as Lead, ahora);
+    }
     this.store.actualizar(tel, cambios);
     this.marcarLeidoUltimo(tel);
   }
@@ -661,35 +756,56 @@ export class Motor {
   }
 
   /** Con el comprobante: evento en el calendario principal, confirmación, formulario y dirección si es presencial. */
-  private async registrarComprobante(tel: string, evidencia: string): Promise<void> {
+  /**
+   * Con el comprobante: evento en el calendario principal (Meet si es en línea), confirmación, formulario,
+   * dirección si es presencial y aviso a Mario. porMario = lo confirmó Mario (OK de "agendar" o PAGADO).
+   */
+  private async registrarComprobante(tel: string, evidencia: string, o: { porMario?: boolean; sinEvento?: boolean } = {}): Promise<string> {
     const lead = this.store.lead(tel)!;
     if (!lead.cita) {
       await this.escalar(lead, { categoria: "otro", motivo: `Envió un comprobante (${evidencia}) pero no hay día y hora acordados en el sistema.`, propuesta: null });
-      return;
+      return "sin cita";
     }
     const nombre = (lead.nombre ?? "").split(" ")[0];
     const cuando = formatoCita(lead.cita, this.cfg.TZ_NEGOCIO);
     const modalidad = lead.modalidad === "presencial" ? "presencial en Cumbayá" : "en línea";
+    const enLinea = lead.modalidad !== "presencial";
     const confirmacion = `${nombre ? `${nombre}, q` : "Q"}uedó agendada tu evaluación para el ${cuando}, ${modalidad}. Te escribo un día antes para recordártelo.`;
-
-    if (!this.calendario) {
+    const pasarAMario = async (motivo: string) => {
       await this.escalar(lead, {
         categoria: "agendar",
-        motivo: `Comprobante recibido (${evidencia}) para ${cuando}, ${modalidad}. Calendario no conectado: crea tú el evento "Sesión de evaluación con ${lead.nombre ?? tel}" y aprueba la confirmación.`,
+        motivo: `Comprobante recibido (${evidencia}) para ${cuando}, ${modalidad}. ${motivo}`,
         propuesta: confirmacion,
+        accion: JSON.stringify({ marcarPagado: true }),
       });
-      return;
+      return "a Mario";
+    };
+
+    let ev: { link: string; meet: string | null } | null = null;
+    if (this.calendario && !o.sinEvento) {
+      try {
+        if (!o.porMario && this.calendario.libre && !(await this.calendario.libre(lead.cita, this.cfg.DURACION_EVALUACION_MIN))) {
+          return pasarAMario("Esa hora ya no está libre en tu calendario: elige otra con el lead y usa PAGADO.");
+        }
+        ev = await this.calendario.crearEvaluacion(
+          lead.cita,
+          `Sesión de evaluación con ${lead.nombre ?? `+${tel}`}`,
+          `Nombre: ${lead.nombre ?? "-"}\nTeléfono: +${tel}\nModalidad: ${modalidad}\nComprobante: ${evidencia}`,
+          this.cfg.DURACION_EVALUACION_MIN,
+          enLinea,
+        );
+      } catch (e) {
+        return pasarAMario(`No se pudo crear el evento (${String(e).slice(0, 120)}): créalo tú y aprueba la confirmación.`);
+      }
+    } else if (!o.porMario) {
+      return pasarAMario(`Calendario no conectado: crea tú el evento "Sesión de evaluación con ${lead.nombre ?? tel}" y aprueba la confirmación.`);
     }
-    const enLinea = lead.modalidad !== "presencial";
-    const ev = await this.calendario.crearEvaluacion(
-      lead.cita,
-      `Sesión de evaluación con ${lead.nombre ?? `+${tel}`}`,
-      `Nombre: ${lead.nombre ?? "-"}\nTeléfono: +${tel}\nModalidad: ${modalidad}\nComprobante: ${evidencia}`,
-      this.cfg.DURACION_EVALUACION_MIN,
-      enLinea,
-    );
-    await this.enviarTexto(lead, confirmacion, { autor: "sistema", tipo: "evaluación", humano: true });
-    if (enLinea && ev.meet) {
+
+    // El pago queda registrado apenas existe el evento: así un segundo comprobante no duplica nada.
+    this.store.actualizar(tel, { pago_confirmado: 1, etapa: "Agendo sesion Evaluacion", paso: "agendado", proximo_toque: null });
+    this.store.log(tel, "evaluacion_agendada", `${lead.cita} ${modalidad}`);
+    await this.enviarTexto(this.store.lead(tel)!, confirmacion, { autor: "sistema", tipo: "evaluación", humano: true });
+    if (enLinea && ev?.meet) {
       await this.enviarTexto(this.store.lead(tel)!, `Este es el link para conectarte ese día: ${ev.meet}`, { autor: "sistema", tipo: "otro", humano: true });
     }
     await this.enviarTexto(
@@ -697,38 +813,46 @@ export class Motor {
       `Antes de la sesión necesito que llenes este formulario, siempre se llena antes de la evaluación: ${this.cfg.FORMULARIO_EVALUACION_URL}`,
       { autor: "sistema", tipo: "otro", humano: true },
     );
-    await this.notificar(
-      `Evaluación agendada: +${tel}${lead.nombre ? ` (${lead.nombre})` : ""}, ${cuando}, ${modalidad}.${ev.meet ? ` Meet: ${ev.meet}` : ""} Evento: ${ev.link}`,
-    );
-    if (lead.modalidad === "presencial" && this.cfg.DIRECCION_CUMBAYA) {
+    if (!enLinea && this.cfg.DIRECCION_CUMBAYA) {
       await this.enviarTexto(
         this.store.lead(tel)!,
         `La dirección es ${this.cfg.DIRECCION_CUMBAYA}.${this.cfg.MAPS_URL ? ` Aquí la ubicación: ${this.cfg.MAPS_URL}` : ""}`,
         { autor: "sistema", tipo: "otro", humano: true },
       );
     }
-    this.store.actualizar(tel, { pago_confirmado: 1, etapa: "Agendo sesion Evaluacion", paso: "agendado", proximo_toque: null });
-    this.store.log(tel, "evaluacion_agendada", `${lead.cita} ${modalidad}`);
+    if (!o.porMario) {
+      await this.notificar(`Evaluación agendada: +${tel}${lead.nombre ? ` (${lead.nombre})` : ""}, ${cuando}, ${modalidad}.${ev?.meet ? ` Meet: ${ev.meet}` : ""}${ev ? ` Evento: ${ev.link}` : ""}`);
+    }
     this.marcarLeidoUltimo(tel);
+    return ev ? `agendada${ev.meet ? `, Meet: ${ev.meet}` : ""}` : o.sinEvento ? "confirmada al lead y pago registrado" : "confirmada al lead (sin calendario: crea tú el evento)";
   }
 
   /** Día anterior a la cita: recordar y confirmar asistencia (y el pago si falta). Mismo día si no pagó. */
   private async recordatoriosDeCita(ahora: Date): Promise<void> {
+    if (this.sombra) return; // las citas reales las recuerda aún el sistema anterior
     const hoy = partesLocales(ahora, this.cfg.TZ_NEGOCIO).fecha;
     const manana = partesLocales(new Date(ahora.getTime() + DIA), this.cfg.TZ_NEGOCIO).fecha;
     for (const l of this.store.leadsConCita()) {
       if (l.pausado || l.dueno === "VERO" || l.etapa === "Converted" || l.etapa === "Lost") continue;
+      if (this.ocupados.has(l.telefono)) continue; // se intenta en el siguiente ciclo
       const diaCita = partesLocales(new Date(l.cita!), this.cfg.TZ_NEGOCIO).fecha;
       if (new Date(l.cita!) <= ahora) continue;
       const toca = diaCita === manana || (diaCita === hoy && !l.pago_confirmado);
       if (!toca || l.recordatorio_cita === hoy) continue;
-      this.store.actualizar(l.telefono, { recordatorio_cita: hoy });
+      // Si la cita se acordó hace pocas horas (acaba de recibir la cuenta), no hace falta recordar todavía.
+      if (diaCita === manana && l.datos_pago_enviados && l.ultimo_out && ahora.getTime() - new Date(l.ultimo_out).getTime() < 6 * 3600_000) {
+        this.store.actualizar(l.telefono, { recordatorio_cita: hoy });
+        continue;
+      }
+      const cuando = diaCita === hoy ? "hoy" : "mañana";
       await this.conCandado(l.telefono, async () => {
-        if (this.sombra) return; // las citas reales las recuerda aún el sistema anterior
-        if (ventanaAbierta(l.ultimo_in, ahora)) return this.turno(l.telefono, "recordatorio");
-        const nombre = (l.nombre ?? "").split(" ")[0] || "hola";
-        const hora = new Date(l.cita!).toLocaleTimeString("es-EC", { timeZone: this.cfg.TZ_NEGOCIO, hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
-        await this.enviarPlantilla(l, this.cfg.PLANTILLA_RECORDATORIO_EVALUACION, [nombre, diaCita === hoy ? "hoy" : "mañana", hora]);
+        if (ventanaAbierta(l.ultimo_in, ahora)) await this.turno(l.telefono, "recordatorio", { cuando });
+        else {
+          const nombre = (l.nombre ?? "").split(" ")[0] || "hola";
+          const hora = new Date(l.cita!).toLocaleTimeString("es-EC", { timeZone: this.cfg.TZ_NEGOCIO, hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+          await this.enviarPlantilla(l, this.cfg.PLANTILLA_RECORDATORIO_EVALUACION, [nombre, cuando, hora]);
+        }
+        this.store.actualizar(l.telefono, { recordatorio_cita: hoy }); // solo si salió sin error
       });
     }
   }
@@ -748,6 +872,15 @@ export class Motor {
     }
     if (lead.fecha_acordada && new Date(`${lead.fecha_acordada}T00:00:00-05:00`) > ahora) {
       this.store.actualizar(tel, { proximo_toque: this.calcularProximoToque(lead, ahora) });
+      return;
+    }
+    // Los seguimientos solo salen de lunes a viernes dentro de las franjas (si llegó tarde, se reprograma).
+    // El primer contacto de un lead de formulario es como una respuesta: puede salir a cualquier hora.
+    const franjas = { tz: this.cfg.TZ_NEGOCIO, feriados: this.cfg.feriados, franjas: this.cfg.franjasSeguimiento };
+    if (lead.paso !== "nuevo" && !enFranjaSeguimiento(ahora, franjas)) {
+      let t = new Date(ahora.getTime() + 15 * 60_000);
+      for (let i = 0; i < 7 * 24 * 4 && !enFranjaSeguimiento(t, franjas); i++) t = new Date(t.getTime() + 15 * 60_000);
+      this.store.actualizar(tel, { proximo_toque: new Date(t.getTime() + Math.floor(this.azar() * 40) * 60_000).toISOString() });
       return;
     }
 
@@ -828,6 +961,10 @@ export class Motor {
     texto: string,
     o: { autor: string; tipo?: string; respondeA?: string | null; humano?: boolean },
   ): Promise<void> {
+    if (this.sombra && !this.cfg.adminNumeros.includes(lead.telefono)) {
+      this.store.log(lead.telefono, "sombra_bloqueado", texto); // en sombra nada sale hacia un lead
+      return;
+    }
     if (o.humano) {
       const ultimoIn = [...this.store.mensajes(lead.telefono, 10)].reverse().find((m) => m.direccion === "in" && m.wa_id);
       if (ultimoIn?.wa_id && this.wa.escribiendo) await this.wa.escribiendo(ultimoIn.wa_id).catch(() => {});
@@ -877,15 +1014,16 @@ export class Motor {
   }
 
   private marcarLeidoUltimo(tel: string): void {
+    if (this.sombra) return; // marcar como leído cambiaría lo que ve Mario en la app
     const ultimo = [...this.store.mensajes(tel, 10)].reverse().find((m) => m.direccion === "in" && m.wa_id);
     if (ultimo?.wa_id) this.wa.marcarLeido(ultimo.wa_id).catch(() => {});
   }
 
   private async escalar(
     lead: Lead,
-    e: { categoria: string; motivo: string; propuesta: string | null; pausar?: boolean },
+    e: { categoria: string; motivo: string; propuesta: string | null; pausar?: boolean; accion?: string },
   ): Promise<Escalacion> {
-    const esc = this.store.crearEscalacion({ telefono: lead.telefono, categoria: e.categoria, motivo: e.motivo, propuesta: e.propuesta });
+    const esc = this.store.crearEscalacion({ telefono: lead.telefono, categoria: e.categoria, motivo: e.motivo, propuesta: e.propuesta, accion: e.accion ?? null });
     if (e.pausar !== false) {
       this.store.actualizar(lead.telefono, {
         pausado: 1,
@@ -1070,21 +1208,50 @@ export class Motor {
       switch (cmd) {
         case "OK":
         case "EDITAR": {
+          if (this.sombra) return responder("Modo sombra: no se envía nada a los leads. Respóndele desde la app.");
           const id = Number(resto[0]);
           const esc = this.store.escalacion(id);
           if (!esc || esc.estado !== "pendiente") return responder(`No hay escalación pendiente #${resto[0]}.`);
-          const cuerpo = cmd === "OK" ? esc.propuesta : texto.replace(/^\S+\s+\S+\s*/, "");
-          if (!cuerpo) return responder(`La escalación #${id} no tiene propuesta. Usa EDITAR ${id} <texto>.`);
-          const lead = this.store.lead(esc.telefono)!;
-          for (const parte of cuerpo.split(/\n{2,}/).map((s) => s.trim()).filter(Boolean).slice(0, 2)) {
-            await this.enviarTexto(this.store.lead(esc.telefono) ?? lead, parte, { autor: cmd === "OK" ? "agente_aprobado" : "mario", tipo: "respuesta", humano: true });
+          const tel = esc.telefono;
+          const lead = this.store.lead(tel)!;
+          const accion = esc.accion ? JSON.parse(esc.accion) : null;
+          const partes =
+            cmd === "OK"
+              ? accion?.mensajes
+                ? (accion.mensajes as { texto: string }[]).map((m) => m.texto)
+                : (esc.propuesta ?? "").split(SEPARADOR).map((x) => x.trim()).filter((x) => x && !/^\[(enviar cuenta|registrar comprobante)/.test(x))
+              : texto.replace(/^\S+\s+\S+\s*/, "").split(/\n{2,}/).map((x) => x.trim()).filter(Boolean);
+          if (!partes.length && !accion) return responder(`La escalación #${id} no tiene propuesta. Usa EDITAR ${id} <texto>.`);
+
+          // Fuera de las 24 h desde el último mensaje del lead, WhatsApp no deja enviar texto libre por la API.
+          if (!ventanaAbierta(lead.ultimo_in, this.reloj())) {
+            if (this.cfg.SEGUIMIENTO_FUERA_DE_VENTANA !== "chrome" || !partes.length) {
+              return responder(`Con +${tel} pasaron más de 24 h desde su último mensaje: por la API solo se pueden enviar plantillas. Escríbele tú desde la app y luego IGNORAR ${id}.`);
+            }
+            this.store.agregarParaChrome(tel, partesLocales(this.reloj(), this.cfg.TZ_NEGOCIO).fecha, partes.join("\n\n"), `aprobado por Mario (#${id})`);
+            this.store.cerrarEscalacion(id, cmd === "OK" ? "enviada" : "editada");
+            this.reanudarSiNoQuedan(tel);
+            return responder(`Con +${tel} pasaron más de 24 h: el texto quedó en la lista de seguimientos para que lo envíe la ronda de Chrome.`);
+          }
+
+          let resultado = `Enviado a +${tel}.`;
+          if (accion?.marcarPagado && cmd === "OK") {
+            // Mario ya creó el evento a mano (así lo pedía la escalación): solo se confirma y se registra el pago.
+            resultado = `+${tel}: ${await this.registrarComprobante(tel, "confirmado por Mario", { porMario: true, sinEvento: true })}.`;
+          } else {
+            const autor = cmd === "OK" ? "agente_aprobado" : "mario";
+            const mensajes =
+              cmd === "OK" && accion?.mensajes ? accion.mensajes : partes.map((t) => ({ texto: t, tipo: "respuesta", profundizar: false, reflejo: false }));
+            await this.ejecutar(tel, { mensajes, datosPago: accion?.datosPago ?? null, comprobante: null }, "respuesta", accion?.respondeA ?? null, autor);
+            if (accion?.comprobante) await this.registrarComprobante(tel, accion.comprobante, { porMario: true });
+            if (accion?.marcarPagado) {
+              this.store.actualizar(tel, { pago_confirmado: 1, etapa: "Agendo sesion Evaluacion", paso: "agendado", proximo_toque: null });
+            }
           }
           this.store.cerrarEscalacion(id, cmd === "OK" ? "enviada" : "editada");
-          this.reanudarSiNoQuedan(esc.telefono);
-          const l = this.store.lead(esc.telefono)!;
-          this.store.actualizar(esc.telefono, { intentos_sin_respuesta: 0, proximo_toque: this.calcularProximoToque(l, this.reloj()) });
-          this.marcarLeidoUltimo(esc.telefono);
-          return responder(`Enviado a +${esc.telefono}.`);
+          this.reanudarSiNoQuedan(tel);
+          this.marcarLeidoUltimo(tel);
+          return responder(resultado);
         }
         case "IGNORAR": {
           const id = Number(resto[0]);
@@ -1113,9 +1280,11 @@ export class Motor {
           if (!["MARIO", "DANI", "VERO"].includes(dueno)) return responder("Uso: DUEÑO <teléfono> MARIO|DANI|VERO");
           if (!this.store.lead(tel)) this.store.crearLead(tel, { dueno: dueno as Dueno, origen: "manual" });
           const l = this.store.lead(tel)!;
-          const cambios: Partial<Lead> = { dueno: dueno as Dueno };
-          if (l.motivo_pausa?.startsWith("chat iniciado desde la app")) Object.assign(cambios, { pausado: 0, motivo_pausa: null });
-          this.store.actualizar(tel, cambios);
+          this.store.actualizar(tel, { dueno: dueno as Dueno });
+          for (const e of this.store.escalacionesPendientes().filter((x) => x.telefono === tel && x.categoria === "asignar_dueno")) {
+            this.store.cerrarEscalacion(e.id, "editada");
+          }
+          if (l.motivo_pausa?.startsWith("chat iniciado desde la app")) this.reanudarSiNoQuedan(tel);
           return responder(`+${tel} ahora es chat de ${dueno}.`);
         }
         case "ETAPA": {
@@ -1135,8 +1304,11 @@ export class Motor {
             this.store.actualizar(tel, { cita: desdeLocal(`${resto[1]}T${resto[2]}`).toISOString(), modalidad: resto[3]?.startsWith("pres") ? "presencial" : lead.modalidad ?? "en línea" });
           }
           if (!this.store.lead(tel)!.cita) return responder("Falta la fecha: PAGADO <tel> AAAA-MM-DD HH:MM [presencial|linea]");
-          await this.registrarComprobante(tel, "confirmado por Mario");
-          return responder(`+${tel}: evaluación agendada y confirmada al lead.`);
+          if (this.sombra) return responder("Modo sombra: no se envía nada a los leads ni se crea el evento.");
+          if (!ventanaAbierta(this.store.lead(tel)!.ultimo_in, this.reloj())) {
+            return responder(`Con +${tel} pasaron más de 24 h desde su último mensaje: confirma tú desde la app. No registré nada.`);
+          }
+          return responder(`+${tel}: ${await this.registrarComprobante(tel, "confirmado por Mario", { porMario: true })}.`);
         }
         case "CONVERTIDO": {
           const tel = normalizarTelefono(resto[0] ?? "");
@@ -1183,13 +1355,17 @@ export class Motor {
     if (!quedan && reanudar && l && !l.motivo_pausa?.startsWith("riesgo")) this.reanudar(tel);
   }
 
-  /** Quita la pausa y, si el lead escribió mientras tanto, deja su mensaje pendiente para el agente. */
+  /** Quita la pausa; si el lead escribió mientras tanto, queda pendiente para el agente; y reprograma el seguimiento. */
   private reanudar(tel: string): void {
+    const ahora = this.reloj();
     const ultimo = this.store.mensajes(tel, 1)[0];
+    const l = this.store.lead(tel)!;
     this.store.actualizar(tel, {
       pausado: 0,
       motivo_pausa: null,
-      pendiente_desde: ultimo?.direccion === "in" ? this.reloj().toISOString() : null,
+      pendiente_desde: ultimo?.direccion === "in" ? ahora.toISOString() : null,
+      responder_despues: ultimo?.direccion === "in" ? new Date(ahora.getTime() + this.lectura(ultimo.texto)).toISOString() : null,
+      proximo_toque: this.calcularProximoToque(l, ahora),
     });
   }
 }

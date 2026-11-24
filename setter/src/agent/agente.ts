@@ -40,6 +40,8 @@ export interface EntradaAgente {
   texto: string;
   adjuntos: { mediaType: string; base64: string }[];
   estado: EstadoRevision;
+  /** Reglas de negocio de la cita (horario, feriados, choques con otras reservas). null = válida. */
+  validarCita?: (fechaHora: string) => string | null;
 }
 
 const MAX_MENSAJES = 2;
@@ -114,7 +116,7 @@ export class AgenteSetter {
       messages.push({ role: "assistant", content: res.content });
       const resultados: Anthropic.Beta.BetaToolResultBlockParam[] = [];
       for (const uso of usos) {
-        const out = await this.ejecutar(uso.name as NombreHerramienta, uso.input, d, estado);
+        const out = await this.ejecutar(uso.name as NombreHerramienta, uso.input, d, estado, entrada.validarCita);
         if (out.identidad) fallosIdentidad++;
         resultados.push({ type: "tool_result", tool_use_id: uso.id, content: out.texto, is_error: out.error });
       }
@@ -142,6 +144,7 @@ export class AgenteSetter {
     input: unknown,
     d: Decision,
     estado: EstadoRevision,
+    validarCita?: (fechaHora: string) => string | null,
   ): Promise<{ texto: string; error?: boolean; identidad?: boolean }> {
     const esquema = Entradas[nombre];
     if (!esquema) return { texto: `Herramienta desconocida: ${nombre}`, error: true };
@@ -203,6 +206,8 @@ export class AgenteSetter {
         const dia = new Date(`${v.fecha_hora.slice(0, 10)}T12:00:00-05:00`).getUTCDay();
         if (dia === 0 || dia === 6) return { texto: "Es fin de semana: la evaluación es solo entre semana. Pide otro día.", error: true };
         if (hora >= 19) return { texto: "Después de las 19:00 no se agenda: ofrece otra hora o escala si el lead insiste.", error: true };
+        const invalida = validarCita?.(v.fecha_hora);
+        if (invalida) return { texto: invalida, error: true };
         if (this.calendario.libre) {
           try {
             const ok = await this.calendario.libre(`${v.fecha_hora}:00-05:00`, this.duracionEvaluacion);

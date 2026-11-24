@@ -59,7 +59,7 @@ Lo que la auditora del sistema anterior encontraba después, aquí se bloquea an
 
 ```bash
 npm install
-npm test                                   # 54 pruebas, incluidos casos reales de la bitácora
+npm test                                   # 68 pruebas: casos reales de la bitácora y de la revisión de código
 ANTHROPIC_API_KEY=... npm run simular -- --nombre Ana --formulario "Tengo ansiedad hace años"
 ```
 

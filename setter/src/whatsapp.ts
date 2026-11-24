@@ -181,6 +181,8 @@ export function parsearWebhook(body: any): EventoWA[] {
       }
 
       for (const m of v.messages ?? []) {
+        // Reacciones, avisos del sistema y tipos no soportados no son mensajes del lead para contestar.
+        if (["reaction", "system", "unsupported", "ephemeral"].includes(String(m.type))) continue;
         const de = normalizarTelefono(String(m.from ?? ""));
         eventos.push({
           tipo: "entrante",

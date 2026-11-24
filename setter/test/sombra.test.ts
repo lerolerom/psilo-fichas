@@ -105,7 +105,7 @@ describe("Meta aprende de las etapas (API de Conversiones)", () => {
       event_name: "Qualified",
       action_source: "system_generated",
       custom_data: { event_source: "crm", lead_event_source: "Despertar Setter" },
-      user_data: { lead_id: 1234567890123456 },
+      user_data: { lead_id: "1234567890123456" },
     });
     expect(m.evento({ ...base, ctwa_clid: "abc" }, "Qualified", ts)).toMatchObject({
       event_name: "QualifiedLead",
