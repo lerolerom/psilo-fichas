@@ -65,22 +65,55 @@ export function siguienteMomentoPermitido(desde: Date, h: Horario, soloDiaHabil:
 }
 
 /**
- * Cadencia del manual vigente (sección 7 y decisiones del 19 y 23 nov 2026):
- * un mensaje por lead por día, siempre con algo nuevo; si el lead lleva más de una semana sin responder,
- * cada 2 o 3 días (aquí: 3). Sigue en Intake, Qualified, Not qualified y Lost hasta un no explícito.
- * Los plazos de 14 y 21 días solo cambian la etapa.
+ * Cadencia (manual, sección 7, y decisión de Mario del 24 nov 2026):
+ * un mensaje por lead por día hábil, siempre con algo nuevo; si lleva más de una semana sin responder,
+ * cada 3 días. Solo de lunes a viernes (sin feriados), alternando la franja de la mañana y la de la tarde
+ * y a una hora distinta cada vez, para que no parezca automático.
  */
 export function esperaSeguimiento(diasSinRespuesta: number): number {
   return diasSinRespuesta >= 7 ? 3 * D : 1 * D;
 }
 
-export function proximoToque(ultimoOut: Date, diasSinRespuesta: number, hSeguimiento: Horario, fechaAcordada?: string | null): Date {
-  let t = new Date(ultimoOut.getTime() + esperaSeguimiento(diasSinRespuesta));
-  if (fechaAcordada) {
-    const acordada = new Date(`${fechaAcordada}T08:00:00-05:00`);
-    if (acordada > t) t = acordada;
+export type Azar = () => number; // 0..1
+
+const pad = (n: number) => String(n).padStart(2, "0");
+
+export function proximoToque(
+  ultimoOut: Date,
+  diasSinRespuesta: number,
+  intentos: number,
+  o: { tz: string; feriados: Set<string>; franjas: [number, number][]; azar: Azar; fechaAcordada?: string | null },
+): Date {
+  // Se cuenta por días de calendario: el toque cae N días después, en la franja que toca, a una hora al azar.
+  const dias = Math.round(esperaSeguimiento(diasSinRespuesta) / D);
+  let base = new Date(ultimoOut.getTime() + dias * D);
+  if (o.fechaAcordada) {
+    const acordada = new Date(`${o.fechaAcordada}T12:00:00-05:00`);
+    if (acordada > base) base = acordada;
   }
-  return siguienteMomentoPermitido(t, hSeguimiento, false);
+  const franjas = o.franjas.length ? o.franjas : [[9 * 60, 18 * 60] as [number, number]];
+  const franja = franjas[intentos % franjas.length];
+  for (let i = 0; i < 21; i++) {
+    const { fecha } = partesLocales(new Date(base.getTime() + i * D), o.tz);
+    const ref = new Date(`${fecha}T12:00:00-05:00`);
+    if (esFinDeSemana(ref, o.tz) || o.feriados.has(fecha)) continue;
+    const minuto = franja[0] + Math.floor(o.azar() * Math.max(1, franja[1] - franja[0]));
+    const t = new Date(`${fecha}T${pad(Math.floor(minuto / 60))}:${pad(minuto % 60)}:00-05:00`);
+    if (t > ultimoOut) return t;
+  }
+  return new Date(base.getTime() + D);
+}
+
+/** Tiempo de "lectura" antes de contestar: al azar entre min y max, un poco más si el mensaje es largo. */
+export function esperaLectura(largoTexto: number, o: { min: number; max: number; azar: Azar }): number {
+  const extra = Math.min(2, largoTexto / 300); // hasta 2 minutos más por mensajes largos
+  const minutos = Math.min(o.max, o.min + o.azar() * (o.max - o.min) * 0.8 + extra);
+  return Math.round(minutos * 60_000);
+}
+
+/** Segundos que tomaría escribir un texto en el celular (para el indicador "escribiendo..."). */
+export function tiempoEscritura(texto: string, azar: Azar): number {
+  return Math.min(25_000, 3_000 + texto.length * 45 + azar() * 3_000);
 }
 
 /** ¿Seguimos dentro de la ventana de atención de 24 h desde el último mensaje del lead? */

@@ -35,15 +35,16 @@ const wa: WhatsApp = {
 
 const cfg = {
   ...config,
-  DEBOUNCE_SEGUNDOS: 0,
-  HORA_INICIO_ENVIO: 0,
-  HORA_FIN_ENVIO: 24,
+  LECTURA_MIN_MINUTOS: 0,
+  LECTURA_MAX_MINUTOS: 0,
   notificarA: config.notificarA.length ? config.notificarA : ["593000000000"],
   adminNumeros: config.adminNumeros.length ? config.adminNumeros : ["593000000000"],
 };
 const store = new Store(":memory:");
 const agente = new AgenteSetter(new Anthropic(), { modelo: cfg.CLAUDE_MODEL, effort: cfg.CLAUDE_EFFORT }, new SinCalendario());
-const motor = new Motor(cfg, store, wa, agente, null);
+let desfase = 0;
+const reloj = () => new Date(Date.now() + desfase);
+const motor = new Motor(cfg, store, wa, agente, null, { reloj, dormir: async () => {} });
 
 const formulario = arg("formulario");
 if (formulario !== undefined) {
@@ -52,9 +53,6 @@ if (formulario !== undefined) {
 
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 console.log("Escribe como el lead. Comandos de Mario: empieza con '/' (ej. /OK 1). Enter vacío = avanzar el reloj 1 día. Ctrl+C para salir.");
-let desfase = 0;
-const reloj = () => new Date(Date.now() + desfase);
-(motor as any).reloj = reloj;
 await motor.tick();
 
 let i = 0;
@@ -70,6 +68,7 @@ for (;;) {
       { tipo: "entrante", de: normalizarTelefono(tel), nombrePerfil: arg("nombre") ?? null, waId: `in-${++i}`, ts: reloj(), clase: "text", texto: linea, referral: null },
     ]);
   }
+  desfase += 61_000; // pasa el minuto mínimo de "lectura"
   await motor.tick();
   const l = store.lead(normalizarTelefono(tel));
   if (l) console.log(`\x1b[90m  etapa=${l.etapa} paso=${l.paso} pausado=${l.pausado ? l.motivo_pausa : "no"} proximo_toque=${l.proximo_toque ?? "-"}\x1b[0m`);

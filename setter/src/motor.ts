@@ -9,24 +9,35 @@ import type { AgenteSetter, Decision } from "./agent/agente.js";
 import { etapaFinal } from "./agent/agente.js";
 import { armarContexto, hechos } from "./contexto.js";
 import { detectarRiesgo, mensajeContencion } from "./riesgo.js";
+import type { Transcriptor } from "./transcriptor.js";
 import {
+  type Azar,
   DIA,
-  HORA,
-  type Horario,
-  dentroDeHorario,
   desdeLocal,
   diasDesde,
-  enRango,
-  esFinDeSemana,
+  esperaLectura,
   formatoCita,
   partesLocales,
   proximoToque,
-  siguienteMomentoPermitido,
+  tiempoEscritura,
   ventanaAbierta,
 } from "./tiempo.js";
 
 export interface CalendarioEscritura {
-  crearEvaluacion(inicioIso: string, titulo: string, descripcion: string, minutos?: number): Promise<string>;
+  crearEvaluacion(
+    inicioIso: string,
+    titulo: string,
+    descripcion: string,
+    minutos?: number,
+    enLinea?: boolean,
+  ): Promise<{ link: string; meet: string | null }>;
+}
+
+export interface OpcionesMotor {
+  reloj?: () => Date;
+  azar?: Azar;
+  dormir?: (ms: number) => Promise<void>;
+  transcriptor?: Transcriptor | null;
 }
 
 type Entrante = Extract<EventoWA, { tipo: "entrante" }>;
@@ -37,10 +48,12 @@ const SIN_SEGUIMIENTO = new Set(["Converted", "Agendo sesion Evaluacion"]);
 const MEDIA_VISIBLE = /^(image\/(jpeg|png|webp|gif)|application\/pdf)$/;
 
 export class Motor {
-  private hResp: Horario;
-  private hSeg: Horario;
   private ocupados = new Set<string>(); // leads con un turno en curso
   private ultimoInAdmin = new Map<string, string>();
+  private reloj: () => Date;
+  private azar: Azar;
+  private dormir: (ms: number) => Promise<void>;
+  private transcriptor: Transcriptor | null;
 
   constructor(
     private cfg: Config,
@@ -48,10 +61,16 @@ export class Motor {
     private wa: WhatsApp,
     private agente: AgenteSetter,
     private calendario: CalendarioEscritura | null,
-    private reloj: () => Date = () => new Date(),
+    opts: OpcionesMotor = {},
   ) {
-    this.hResp = { tz: cfg.TZ_NEGOCIO, horaInicio: cfg.HORA_INICIO_ENVIO, horaFin: cfg.HORA_FIN_ENVIO, feriados: cfg.feriados };
-    this.hSeg = { tz: cfg.TZ_NEGOCIO, horaInicio: cfg.HORA_INICIO_SEGUIMIENTO, horaFin: cfg.HORA_FIN_SEGUIMIENTO, feriados: cfg.feriados };
+    this.reloj = opts.reloj ?? (() => new Date());
+    this.azar = opts.azar ?? Math.random;
+    this.dormir = opts.dormir ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+    this.transcriptor = opts.transcriptor ?? null;
+  }
+
+  private lectura(texto: string): number {
+    return esperaLectura(texto.length, { min: this.cfg.LECTURA_MIN_MINUTOS, max: this.cfg.LECTURA_MAX_MINUTOS, azar: this.azar });
   }
 
   // =====================================================================
@@ -79,14 +98,6 @@ export class Motor {
 
   private nuestros(tel: string): Mensaje[] {
     return this.store.mensajes(tel, 500).filter((m) => m.direccion === "out" || m.direccion === "eco");
-  }
-
-  private enFranjaVero(d: Date): boolean {
-    return !esFinDeSemana(d, this.cfg.TZ_NEGOCIO) && enRango(d, this.cfg.TZ_NEGOCIO, this.cfg.franjaVero);
-  }
-
-  private enVentanaSeguimientos(d: Date): boolean {
-    return enRango(d, this.cfg.TZ_NEGOCIO, this.cfg.ventanaSeguimientos);
   }
 
   private async entrante(ev: Entrante): Promise<void> {
@@ -126,7 +137,16 @@ export class Motor {
       return;
     }
 
-    if (ev.mediaId && this.wa.descargarMedia) await this.guardarAdjunto(ev.waId, ev.mediaId);
+    let texto = ev.texto;
+    if (ev.clase === "audio" && ev.mediaId) {
+      const t = await this.transcribir(ev.mediaId);
+      if (t) {
+        texto = t;
+        this.store.ponerTexto(ev.waId, t);
+      }
+    } else if (ev.mediaId && this.wa.descargarMedia) {
+      await this.guardarAdjunto(ev.waId, ev.mediaId);
+    }
     if (ev.formulario) {
       this.store.actualizar(ev.de, { formulario: [lead.formulario, ev.formulario].filter(Boolean).join("\n"), origen: lead.origen ?? "formulario" });
     }
@@ -134,8 +154,8 @@ export class Motor {
     // Chats de Vero: no se leen ni se contestan, y quedan como no leídos.
     // Única excepción: una señal de riesgo se avisa a los fundadores (sin escribirle al lead).
     if (lead.dueno === "VERO") {
-      if (detectarRiesgo(ev.texto)) {
-        await this.notificar(`URGENTE: posible señal de riesgo en un chat de VERO (+${ev.de}). No se respondió nada. Mensaje: "${resumir(ev.texto)}"`);
+      if (detectarRiesgo(texto)) {
+        await this.notificar(`URGENTE: posible señal de riesgo en un chat de VERO (+${ev.de}). No se respondió nada. Mensaje: "${resumir(texto)}"`);
       }
       return;
     }
@@ -144,19 +164,20 @@ export class Motor {
     if (lead.paso === "contactado" || lead.paso === "nuevo") cambios.paso = "abrio";
 
     // Riesgo: antes que cualquier otra cosa y a cualquier hora, sin pasar por el agente de ventas.
-    const riesgo = detectarRiesgo(ev.texto);
+    const riesgo = detectarRiesgo(texto);
     if (riesgo) {
       this.store.actualizar(ev.de, { ...cambios, pausado: 1, motivo_pausa: `riesgo ${riesgo}`, pendiente_desde: null });
       const lead2 = this.store.lead(ev.de)!;
       if (riesgo === "alto" && this.cfg.MODO !== "pausado") {
+        // Riesgo: sin tiempo de lectura, se contesta de inmediato.
         await this.enviarTexto(lead2, mensajeContencion(lead2.nombre), { autor: "sistema", tipo: "otro", respondeA: ev.ts.toISOString() });
       }
       await this.escalar(lead2, {
         categoria: "riesgo",
         motivo:
           riesgo === "alto"
-            ? `Posible riesgo de autolesión. Se envió mensaje de contención con 171 opción 6 y 911. Mensaje: "${ev.texto}"`
-            : `Señal ambigua de riesgo. No se respondió nada. Mensaje: "${ev.texto}"`,
+            ? `Posible riesgo de autolesión. Se envió mensaje de contención con 171 opción 6 y 911. Mensaje${ev.clase === "audio" ? " (audio transcrito)" : ""}: "${texto}"`
+            : `Señal ambigua de riesgo. No se respondió nada. Mensaje${ev.clase === "audio" ? " (audio transcrito)" : ""}: "${texto}"`,
         propuesta: null,
       });
       return;
@@ -165,17 +186,40 @@ export class Motor {
     if (lead.pausado) {
       this.store.actualizar(ev.de, cambios);
       if (lead.motivo_pausa?.startsWith("riesgo")) {
-        await this.notificar(`URGENTE: +${ev.de}${lead.nombre ? ` (${lead.nombre})` : ""}, caso de riesgo, volvió a escribir: "${resumir(ev.texto || `[${ev.clase}]`)}"`);
+        await this.notificar(`URGENTE: +${ev.de}${lead.nombre ? ` (${lead.nombre})` : ""}, caso de riesgo, volvió a escribir: "${resumir(texto || `[${ev.clase}]`)}"`);
       }
       return; // su caso ya está para Mario; aparece en el reporte diario
     }
 
-    if (lead.humano_hasta && new Date(lead.humano_hasta) > ahora) {
-      this.store.actualizar(ev.de, cambios); // alguien del equipo está llevando el chat
-      return;
+    // Tiempo de "lectura": se contesta como lo haría una persona, no al instante. Si el lead sigue escribiendo,
+    // se espera al menos un minuto desde su último mensaje. Si Mario acaba de escribir desde la app, se le da margen.
+    let objetivo: Date;
+    if (lead.pendiente_desde && lead.responder_despues) {
+      // Ya estaba leyendo una ráfaga de mensajes: se respeta ese tiempo, pero al menos un minuto desde el último.
+      const previo = new Date(lead.responder_despues);
+      const minimo = new Date(ahora.getTime() + 60_000);
+      objetivo = previo > minimo ? previo : minimo;
+    } else {
+      objetivo = new Date(ahora.getTime() + this.lectura(texto));
     }
+    if (lead.humano_hasta && new Date(lead.humano_hasta) > objetivo) objetivo = new Date(lead.humano_hasta);
+    this.store.actualizar(ev.de, {
+      ...cambios,
+      pendiente_desde: lead.pendiente_desde ?? ahora.toISOString(),
+      responder_despues: objetivo.toISOString(),
+    });
+  }
 
-    this.store.actualizar(ev.de, { ...cambios, pendiente_desde: lead.pendiente_desde ?? ahora.toISOString() });
+  private async transcribir(mediaId: string): Promise<string | null> {
+    if (!this.transcriptor || !this.wa.descargarMedia) return null;
+    try {
+      const m = await this.wa.descargarMedia(mediaId);
+      if (!m) return null;
+      return await this.transcriptor.transcribir(m.data, m.mime);
+    } catch (e) {
+      this.store.log(null, "transcripcion_error", String(e));
+      return null;
+    }
   }
 
   private async guardarAdjunto(waId: string, mediaId: string): Promise<void> {
@@ -221,14 +265,17 @@ export class Motor {
       this.store.actualizar(ev.para, { historial_incompleto: 1 });
       return;
     }
-    const cambios: Partial<Lead> = {
-      humano_hasta: new Date(ahora.getTime() + this.cfg.HUMANO_SILENCIO_HORAS * HORA).toISOString(),
+    // Mario contestó desde la app: ese mensaje queda en la conversación (el agente lo lee y sigue desde ahí).
+    // Lo pendiente se da por atendido y, si el lead responde enseguida, se le da a Mario unos minutos de margen.
+    void primeroNuestro;
+    this.store.actualizar(ev.para, {
+      humano_hasta: new Date(ahora.getTime() + this.cfg.ESPERA_TRAS_MARIO_MINUTOS * 60_000).toISOString(),
       pendiente_desde: null,
+      responder_despues: null,
       ultimo_out: ahora.toISOString(),
-    };
-    // Franja de Vero: si el primer mensaje a un lead nuevo sale de la app en esa franja, es de Vero.
-    if (primeroNuestro && this.enFranjaVero(ahora) && lead.origen !== "app") cambios.dueno = "VERO";
-    this.store.actualizar(ev.para, cambios);
+      intentos_sin_respuesta: 0,
+      proximo_toque: this.calcularProximoToque({ ...lead, intentos_sin_respuesta: 0 }, ahora),
+    });
   }
 
   /** Lead de formulario instantáneo, landing o abandonado. */
@@ -258,8 +305,8 @@ export class Motor {
       },
       ahora,
     );
-    // Primer contacto (abandonados incluidos: "estos leads sí se escriben"): lo hace el ciclo de seguimiento.
-    this.store.actualizar(tel, { proximo_toque: siguienteMomentoPermitido(ahora, this.hSeg, false).toISOString() });
+    // Primer contacto (abandonados incluidos: "estos leads sí se escriben"), tras un tiempo de "lectura".
+    this.store.actualizar(tel, { proximo_toque: new Date(ahora.getTime() + this.lectura(datos.formulario ?? "")).toISOString() });
     return this.store.lead(tel)!;
   }
 
@@ -271,35 +318,25 @@ export class Motor {
     const ahora = this.reloj();
     await this.quizasReporteDiario(ahora);
     if (this.cfg.MODO === "pausado") return;
+    const tareas: Promise<void>[] = [];
 
-    // 1) Respuestas. En la ventana de seguimientos (08:00 a 09:30) no se contestan mensajes (Mario, 23 nov 2026).
-    if (!this.enVentanaSeguimientos(ahora) && dentroDeHorario(ahora, this.hResp)) {
-      const limite = new Date(ahora.getTime() - this.cfg.DEBOUNCE_SEGUNDOS * 1000);
-      for (const lead of this.store.leadsConPendientes(limite)) {
-        if (!this.hayCupo(ahora)) break;
-        if (this.esperaFranjaVero(lead, ahora)) continue;
-        await this.conCandado(lead.telefono, () => this.turno(lead.telefono, "respuesta"));
-      }
+    // 1) Respuestas, a cualquier hora, cuando pasó el tiempo de "lectura".
+    for (const lead of this.store.leadsListosParaResponder(ahora)) {
+      if (!this.hayCupo(ahora)) break;
+      if (lead.humano_hasta && new Date(lead.humano_hasta) > ahora) continue;
+      tareas.push(this.conCandado(lead.telefono, () => this.turno(lead.telefono, "respuesta")));
     }
 
-    // 2) Seguimientos, primeros contactos y recordatorios de cita: 08:00 a 21:59, todos los días.
-    if (dentroDeHorario(ahora, this.hSeg)) {
-      await this.recordatoriosDeCita(ahora);
-      for (const lead of this.store.leadsConToqueVencido(ahora)) {
-        if (!this.hayCupo(ahora)) break;
-        await this.conCandado(lead.telefono, () => this.seguimiento(lead.telefono));
-      }
+    // 2) Recordatorios de cita (desde las 09:00) y seguimientos (la hora ya viene elegida dentro de las franjas).
+    const hora = partesLocales(ahora, this.cfg.TZ_NEGOCIO).hora;
+    if (hora >= 9 && hora < 20) await this.recordatoriosDeCita(ahora);
+    for (const lead of this.store.leadsConToqueVencido(ahora)) {
+      if (!this.hayCupo(ahora)) break;
+      tareas.push(this.conCandado(lead.telefono, () => this.seguimiento(lead.telefono)));
     }
+    await Promise.all(tareas);
 
     this.reglasDePaso(ahora);
-  }
-
-  /** En la franja de Vero, un lead nuevo es de Vero salvo que lleve más de 15 minutos sin respuesta. */
-  private esperaFranjaVero(lead: Lead, ahora: Date): boolean {
-    if (!this.enFranjaVero(ahora)) return false;
-    if (this.nuestros(lead.telefono).length > 0 || lead.historial_incompleto) return false;
-    const desde = new Date(lead.pendiente_desde ?? lead.creado).getTime();
-    return ahora.getTime() - desde < this.cfg.FRANJA_VERO_ESPERA_MIN * 60_000;
   }
 
   private hayCupo(ahora: Date): boolean {
@@ -381,7 +418,7 @@ export class Motor {
       estado: { chatNuevo: h.chatNuevo, preguntasProfundizar: lead.preguntas_profundizar, precioEvaluacionDado: h.precioEvaluacionDado },
     });
     this.store.log(tel, "decision", JSON.stringify(d));
-    this.store.actualizar(tel, { pendiente_desde: null });
+    this.store.actualizar(tel, { pendiente_desde: null, responder_despues: null });
     await this.aplicar(lead, d, modo, respondeA);
   }
 
@@ -436,7 +473,8 @@ export class Motor {
 
     let enviados = 0;
     for (const m of d.mensajes) {
-      await this.enviarTexto(this.store.lead(tel)!, m.texto, { autor: "agente", tipo: m.tipo, respondeA });
+      if (enviados > 0) await this.dormir(15_000 + this.azar() * 30_000); // pausa entre dos mensajes seguidos
+      await this.enviarTexto(this.store.lead(tel)!, m.texto, { autor: "agente", tipo: m.tipo, respondeA, humano: true });
       const l = this.store.lead(tel)!;
       const cambios: Partial<Lead> = {};
       if (m.profundizar) cambios.preguntas_profundizar = l.preguntas_profundizar + 1;
@@ -468,7 +506,13 @@ export class Motor {
 
   private calcularProximoToque(l: Lead, ahora: Date): string | null {
     if (l.dijo_no || SIN_SEGUIMIENTO.has(l.etapa) || l.paso === "agendado" || l.paso === "cerrado") return null;
-    return proximoToque(ahora, diasDesde(l.ultimo_in ?? l.creado, ahora), this.hSeg, l.fecha_acordada).toISOString();
+    return proximoToque(ahora, diasDesde(l.ultimo_in ?? l.creado, ahora), l.intentos_sin_respuesta, {
+      tz: this.cfg.TZ_NEGOCIO,
+      feriados: this.cfg.feriados,
+      franjas: this.cfg.franjasSeguimiento,
+      azar: this.azar,
+      fechaAcordada: l.fecha_acordada,
+    }).toISOString();
   }
 
   /** Cuenta para la transferencia de $40 y formulario, con el texto aprobado (manual, sección 4). */
@@ -489,12 +533,12 @@ export class Motor {
     await this.enviarTexto(
       lead,
       `Excelente. La transferencia de los $40 por favor a esta cuenta:\n${cuenta}\n\nCuando la hagas, me envías el comprobante y yo te agendo la evaluación en ese día y hora.`,
-      { autor: "sistema", tipo: "otro" },
+      { autor: "sistema", tipo: "otro", humano: true },
     );
     await this.enviarTexto(
       this.store.lead(tel)!,
       `Y este es el formulario que se llena antes de la sesión de evaluación: ${this.cfg.FORMULARIO_EVALUACION_URL}`,
-      { autor: "sistema", tipo: "otro" },
+      { autor: "sistema", tipo: "otro", humano: true },
     );
     this.store.actualizar(tel, { datos_pago_enviados: 1, horario_ofrecido: 1 });
     return 2;
@@ -520,23 +564,31 @@ export class Motor {
       });
       return;
     }
-    await this.calendario.crearEvaluacion(
+    const enLinea = lead.modalidad !== "presencial";
+    const ev = await this.calendario.crearEvaluacion(
       lead.cita,
       `Sesión de evaluación con ${lead.nombre ?? `+${tel}`}`,
       `Nombre: ${lead.nombre ?? "-"}\nTeléfono: +${tel}\nModalidad: ${modalidad}\nComprobante: ${evidencia}`,
       this.cfg.DURACION_EVALUACION_MIN,
+      enLinea,
     );
-    await this.enviarTexto(lead, confirmacion, { autor: "sistema", tipo: "evaluación" });
+    await this.enviarTexto(lead, confirmacion, { autor: "sistema", tipo: "evaluación", humano: true });
+    if (enLinea && ev.meet) {
+      await this.enviarTexto(this.store.lead(tel)!, `Este es el link para conectarte ese día: ${ev.meet}`, { autor: "sistema", tipo: "otro", humano: true });
+    }
     await this.enviarTexto(
       this.store.lead(tel)!,
       `Antes de la sesión necesito que llenes este formulario, siempre se llena antes de la evaluación: ${this.cfg.FORMULARIO_EVALUACION_URL}`,
-      { autor: "sistema", tipo: "otro" },
+      { autor: "sistema", tipo: "otro", humano: true },
+    );
+    await this.notificar(
+      `Evaluación agendada: +${tel}${lead.nombre ? ` (${lead.nombre})` : ""}, ${cuando}, ${modalidad}.${ev.meet ? ` Meet: ${ev.meet}` : ""} Evento: ${ev.link}`,
     );
     if (lead.modalidad === "presencial" && this.cfg.DIRECCION_CUMBAYA) {
       await this.enviarTexto(
         this.store.lead(tel)!,
         `La dirección es ${this.cfg.DIRECCION_CUMBAYA}.${this.cfg.MAPS_URL ? ` Aquí la ubicación: ${this.cfg.MAPS_URL}` : ""}`,
-        { autor: "sistema", tipo: "otro" },
+        { autor: "sistema", tipo: "otro", humano: true },
       );
     }
     this.store.actualizar(tel, { pago_confirmado: 1, etapa: "Agendo sesion Evaluacion", paso: "agendado", proximo_toque: null });
@@ -577,8 +629,8 @@ export class Motor {
       this.store.actualizar(tel, { proximo_toque: lead.humano_hasta });
       return;
     }
-    if (lead.fecha_acordada && new Date(`${lead.fecha_acordada}T08:00:00-05:00`) > ahora) {
-      this.store.actualizar(tel, { proximo_toque: siguienteMomentoPermitido(new Date(`${lead.fecha_acordada}T08:00:00-05:00`), this.hSeg, false).toISOString() });
+    if (lead.fecha_acordada && new Date(`${lead.fecha_acordada}T00:00:00-05:00`) > ahora) {
+      this.store.actualizar(tel, { proximo_toque: this.calcularProximoToque(lead, ahora) });
       return;
     }
 
@@ -647,7 +699,20 @@ export class Motor {
   // Envío, escalación y notificaciones
   // =====================================================================
 
-  private async enviarTexto(lead: Lead, texto: string, o: { autor: string; tipo?: string; respondeA?: string | null }): Promise<void> {
+  /**
+   * Envía un texto. Con humano=true, antes muestra "escribiendo..." el tiempo que tomaría escribirlo
+   * (y marca como leído el último mensaje del lead), como lo haría una persona.
+   */
+  private async enviarTexto(
+    lead: Lead,
+    texto: string,
+    o: { autor: string; tipo?: string; respondeA?: string | null; humano?: boolean },
+  ): Promise<void> {
+    if (o.humano) {
+      const ultimoIn = [...this.store.mensajes(lead.telefono, 10)].reverse().find((m) => m.direccion === "in" && m.wa_id);
+      if (ultimoIn?.wa_id && this.wa.escribiendo) await this.wa.escribiendo(ultimoIn.wa_id).catch(() => {});
+      await this.dormir(tiempoEscritura(texto, this.azar));
+    }
     const waId = await this.wa.enviarTexto(lead.telefono, texto);
     const ts = this.reloj().toISOString();
     this.store.guardarMensaje({
@@ -814,7 +879,7 @@ export class Motor {
           if (!cuerpo) return responder(`La escalación #${id} no tiene propuesta. Usa EDITAR ${id} <texto>.`);
           const lead = this.store.lead(esc.telefono)!;
           for (const parte of cuerpo.split(/\n{2,}/).map((s) => s.trim()).filter(Boolean).slice(0, 2)) {
-            await this.enviarTexto(this.store.lead(esc.telefono) ?? lead, parte, { autor: cmd === "OK" ? "agente_aprobado" : "mario", tipo: "respuesta" });
+            await this.enviarTexto(this.store.lead(esc.telefono) ?? lead, parte, { autor: cmd === "OK" ? "agente_aprobado" : "mario", tipo: "respuesta", humano: true });
           }
           this.store.cerrarEscalacion(id, cmd === "OK" ? "enviada" : "editada");
           this.reanudarSiNoQuedan(esc.telefono);

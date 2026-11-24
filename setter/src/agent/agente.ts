@@ -32,6 +32,7 @@ export interface Decision {
 export interface Calendario {
   ocupado(fecha: string): Promise<string>;
   libre?(inicioIso: string, minutos: number): Promise<boolean>;
+  huecosLibres?(cercaDeIso: string, minutos: number, max?: number): Promise<string[]>;
 }
 
 /** Contenido para el agente: texto de la ficha + adjuntos recientes del lead (comprobantes). */
@@ -205,7 +206,17 @@ export class AgenteSetter {
         if (this.calendario.libre) {
           try {
             const ok = await this.calendario.libre(`${v.fecha_hora}:00-05:00`, this.duracionEvaluacion);
-            if (!ok) return { texto: "Esa hora choca con otro evento del calendario de Mario. Dile que no está disponible y ofrece otro día u hora libre.", error: true };
+            if (!ok) {
+              const huecos = this.calendario.huecosLibres
+                ? await this.calendario.huecosLibres(`${v.fecha_hora}:00-05:00`, this.duracionEvaluacion).catch(() => [])
+                : [];
+              return {
+                texto:
+                  "Esa hora choca con otro evento del calendario de Mario. Dile que esa hora no está disponible y ofrécele otra libre" +
+                  (huecos.length ? `. Horarios libres cercanos: ${huecos.join("; ")}. Ofrece uno o dos y pregunta cuál le queda mejor.` : "."),
+                error: true,
+              };
+            }
           } catch (e) {
             return { texto: `No pude revisar el calendario (${(e as Error).message}). No confirmes: escala con categoria "otro".`, error: true };
           }

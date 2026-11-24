@@ -6,6 +6,8 @@ export interface WhatsApp {
   enviarTexto(to: string, texto: string): Promise<string>;
   enviarPlantilla(to: string, nombre: string, params: string[]): Promise<string>;
   marcarLeido(waMessageId: string): Promise<void>;
+  /** Marca el mensaje como leído y muestra "escribiendo..." (hasta 25 s o hasta que se envía la respuesta). */
+  escribiendo?(waMessageId: string): Promise<void>;
   /** Descarga un adjunto (imagen, PDF). Devuelve null si no se puede. */
   descargarMedia?(mediaId: string): Promise<{ mime: string; data: Buffer } | null>;
 }
@@ -58,6 +60,15 @@ export class WhatsAppCloud implements WhatsApp {
 
   async marcarLeido(waMessageId: string): Promise<void> {
     await this.post({ messaging_product: "whatsapp", status: "read", message_id: waMessageId });
+  }
+
+  async escribiendo(waMessageId: string): Promise<void> {
+    await this.post({
+      messaging_product: "whatsapp",
+      status: "read",
+      message_id: waMessageId,
+      typing_indicator: { type: "text" },
+    });
   }
 
   async descargarMedia(mediaId: string): Promise<{ mime: string; data: Buffer } | null> {

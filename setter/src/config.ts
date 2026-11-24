@@ -41,19 +41,18 @@ const Env = z.object({
   MAPS_URL: z.string().default(""),
   TELEFONO_DANIELA: z.string().default(""), // para la derivación a terapia con Daniela (lista Terapia Dani)
   DURACION_EVALUACION_MIN: z.coerce.number().default(45),
-  // Horarios (decisiones de Mario del 20 al 23 nov 2026)
-  VENTANA_SEGUIMIENTOS: z.string().default("08:00-09:30"), // vacío = sin ventana; en ella no se contestan mensajes
-  FRANJA_VERO: z.string().default("15:00-17:00"), // lunes a viernes; vacío = sin franja
-  FRANJA_VERO_ESPERA_MIN: z.coerce.number().default(15),
+  // Horarios (decisión de Mario, 24 nov 2026): se contesta toda la noche con tiempo de "lectura";
+  // los seguimientos van de lunes a viernes, alternando mañana y tarde, a horas que varían.
+  LECTURA_MIN_MINUTOS: z.coerce.number().default(3),
+  LECTURA_MAX_MINUTOS: z.coerce.number().default(10),
+  ESPERA_TRAS_MARIO_MINUTOS: z.coerce.number().default(10), // si Mario escribió desde la app, se le da este margen
+  FRANJAS_SEGUIMIENTO: z.string().default("09:00-12:00,15:00-18:30"),
+  HORARIO_EVALUACIONES: z.string().default("09:00-19:00"), // entre semana; la evaluación debe terminar antes del fin
   HORA_REPORTE_DIARIO: z.string().default("07:50"),
+  // Audios: Whisper en un contenedor propio (API compatible con OpenAI). Vacío = los audios se escalan.
+  WHISPER_URL: z.string().default(""),
+  WHISPER_MODELO: z.string().default("Systran/faster-whisper-small"),
   AVISOS_INMEDIATOS: z.string().default("riesgo,reclamo,caliente,identidad"),
-  DEBOUNCE_SEGUNDOS: z.coerce.number().default(90),
-  HUMANO_SILENCIO_HORAS: z.coerce.number().default(12),
-  // Respuestas: 24 horas (Mario prefiere contestar también de noche). Seguimientos: 08:00 a 21:59.
-  HORA_INICIO_ENVIO: z.coerce.number().default(0),
-  HORA_FIN_ENVIO: z.coerce.number().default(24),
-  HORA_INICIO_SEGUIMIENTO: z.coerce.number().default(8),
-  HORA_FIN_SEGUIMIENTO: z.coerce.number().default(22),
   FERIADOS: z.string().default(""), // YYYY-MM-DD separados por coma
   MAX_MENSAJES_HORA: z.coerce.number().default(60),
   ADMIN_API_TOKEN: z.string().default(""),
@@ -73,22 +72,28 @@ const Env = z.object({
   PLANTILLA_SEGUIMIENTO_CONVERSANDO: z.string().default("seguimiento_conversando_1,seguimiento_conversando_2"),
   PLANTILLA_SEGUIMIENTO_OFRECIDO: z.string().default("seguimiento_ofrecido_1,seguimiento_ofrecido_2"),
 
-  // Google Calendar (opcional)
-  GOOGLE_SERVICE_ACCOUNT_JSON: z.string().default(""),
-  GOOGLE_CALENDAR_ID: z.string().default(""),
+  // Google Calendar de Mario. Recomendado: OAuth con su cuenta (permite crear links de Meet).
+  GOOGLE_CLIENT_ID: z.string().default(""),
+  GOOGLE_CLIENT_SECRET: z.string().default(""),
+  GOOGLE_REFRESH_TOKEN: z.string().default(""),
+  GOOGLE_SERVICE_ACCOUNT_JSON: z.string().default(""), // alternativa sin Meet
+  GOOGLE_CALENDAR_ID: z.string().default("primary"),
 });
 
-const env = Env.parse(process.env);
-
-export const config = {
+export function crearConfig(fuente: Record<string, string | undefined>) {
+  const env = Env.parse(fuente);
+  return {
   ...env,
   adminNumeros: lista(env.ADMIN_NUMEROS).map(normalizarTelefono),
   notificarA: lista(env.NOTIFICAR_A || env.ADMIN_NUMEROS).map(normalizarTelefono),
   feriados: new Set(lista(env.FERIADOS)),
   avisosInmediatos: new Set(lista(env.AVISOS_INMEDIATOS)),
-  ventanaSeguimientos: rango(env.VENTANA_SEGUIMIENTOS),
-  franjaVero: rango(env.FRANJA_VERO),
+  franjasSeguimiento: lista(env.FRANJAS_SEGUIMIENTO).map(rango).filter((r): r is [number, number] => !!r),
+  horarioEvaluaciones: rango(env.HORARIO_EVALUACIONES) ?? [9 * 60, 19 * 60],
 };
+}
+
+export const config = crearConfig(process.env);
 
 /** "08:00-09:30" -> minutos desde medianoche [480, 570]. Vacío -> null. */
 export function rango(v: string): [number, number] | null {
@@ -97,7 +102,7 @@ export function rango(v: string): [number, number] | null {
   return [Number(m[1]) * 60 + Number(m[2]), Number(m[3]) * 60 + Number(m[4])];
 }
 
-export type Config = typeof config;
+export type Config = ReturnType<typeof crearConfig>;
 
 /** Normaliza a formato E.164 sin "+": 0991234567 -> 593991234567. */
 export function normalizarTelefono(raw: string): string {

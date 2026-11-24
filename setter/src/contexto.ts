@@ -38,6 +38,7 @@ function etiqueta(m: Mensaje): string {
 function contenido(m: Mensaje): string {
   if (m.tipo === "text" || m.tipo === "template") return m.texto;
   if (m.tipo === "interactive" && m.texto) return `[respuesta del formulario] ${m.texto}`;
+  if (m.tipo === "audio") return m.texto ? `[audio, transcripción] ${m.texto}` : "[audio]";
   const extra = m.texto ? `: ${m.texto}` : "";
   const adj = m.media_path ? " (adjunto visible arriba)" : "";
   return `[${m.tipo}${extra}]${adj}`;

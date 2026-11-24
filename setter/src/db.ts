@@ -66,6 +66,7 @@ export interface Lead {
   oferta_dani: number; // 0 no ofrecida, 1 ofrecida, 2 aceptó, 3 rechazó
   historial_incompleto: number; // chat anterior al sistema: nunca plantilla de primer mensaje
   fecha_acordada: string | null; // "escríbeme en enero": no se escribe antes
+  responder_despues: string | null; // ISO: tiempo de "lectura" antes de contestar
 }
 
 export interface Mensaje {
@@ -192,6 +193,7 @@ export class Store {
       ["leads", "oferta_dani", "INTEGER NOT NULL DEFAULT 0"],
       ["leads", "historial_incompleto", "INTEGER NOT NULL DEFAULT 0"],
       ["leads", "fecha_acordada", "TEXT"],
+      ["leads", "responder_despues", "TEXT"],
       ["mensajes", "tipo_envio", "TEXT"],
       ["escalaciones", "avisada", "INTEGER NOT NULL DEFAULT 0"],
       ["mensajes", "media_path", "TEXT"],
@@ -233,10 +235,13 @@ export class Store {
     this.db.prepare(`UPDATE leads SET ${set} WHERE telefono = @telefono`).run({ ...cambios, telefono });
   }
 
-  leadsConPendientes(antesDe: Date): Lead[] {
+  /** Leads con mensajes sin contestar cuyo tiempo de "lectura" ya pasó. */
+  leadsListosParaResponder(ahora: Date): Lead[] {
     return this.db
-      .prepare("SELECT * FROM leads WHERE pendiente_desde IS NOT NULL AND pendiente_desde <= ?")
-      .all(antesDe.toISOString()) as Lead[];
+      .prepare(
+        "SELECT * FROM leads WHERE pendiente_desde IS NOT NULL AND COALESCE(responder_despues, pendiente_desde) <= ? ORDER BY pendiente_desde",
+      )
+      .all(ahora.toISOString()) as Lead[];
   }
 
   leadsConToqueVencido(ahora: Date): Lead[] {
@@ -324,6 +329,10 @@ export class Store {
 
   setKv(clave: string, valor: string): void {
     this.db.prepare("INSERT INTO kv (clave, valor) VALUES (?, ?) ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor").run(clave, valor);
+  }
+
+  ponerTexto(waId: string, texto: string): void {
+    this.db.prepare("UPDATE mensajes SET texto = ? WHERE wa_id = ?").run(texto, waId);
   }
 
   ponerMedia(waId: string, ruta: string): void {

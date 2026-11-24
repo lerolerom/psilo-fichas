@@ -1,0 +1,28 @@
+# Setter + Whisper (transcripción de audios) en el mismo servidor. Los audios no salen de aquí.
+services:
+  setter:
+    build: .
+    env_file: .env
+    environment:
+      WHISPER_URL: http://whisper:8000
+    ports:
+      - "3000:3000"
+    volumes:
+      - datos:/data
+    depends_on:
+      - whisper
+    restart: unless-stopped
+
+  whisper:
+    # Servidor de Whisper con API compatible con OpenAI (antes faster-whisper-server).
+    # Verifica la etiqueta vigente en github.com/speaches-ai/speaches antes de desplegar.
+    image: ghcr.io/speaches-ai/speaches:latest-cpu
+    environment:
+      WHISPER__MODEL: Systran/faster-whisper-small
+    volumes:
+      - modelos:/home/ubuntu/.cache/huggingface
+    restart: unless-stopped
+
+volumes:
+  datos:
+  modelos:

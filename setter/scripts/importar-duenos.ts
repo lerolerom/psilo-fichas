@@ -4,6 +4,7 @@
  *
  * Uso: npm run importar-duenos -- duenos.csv
  * CSV con encabezado: telefono,dueno,etapa,nombre
+ * También acepta la hoja "CRM Leads WhatsApp Despertar" exportada a CSV (Teléfono, Dueño del chat, Etapa).
  *   0991234567,MARIO,Qualified,Ana Pérez
  *   593987654321,VERO,,
  *
@@ -22,7 +23,13 @@ if (!archivo) {
 const store = new Store(config.DB_PATH);
 const lineas = fs.readFileSync(archivo, "utf8").split(/\r?\n/).filter((l) => l.trim());
 const [enc, ...filas] = lineas;
-const cols = enc.split(",").map((c) => c.trim().toLowerCase());
+const sinTildes = (x: string) => x.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+const cols = enc.split(",").map((c) => {
+  const k = sinTildes(c.trim().toLowerCase());
+  if (k.startsWith("telefono")) return "telefono";
+  if (k.startsWith("dueno")) return "dueno";
+  return k;
+});
 let creados = 0;
 let actualizados = 0;
 const errores: string[] = [];
@@ -36,7 +43,8 @@ for (const fila of filas) {
     errores.push(fila);
     continue;
   }
-  const etapa = ETAPAS.find((e) => e.toLowerCase() === get("etapa").toLowerCase()) as Etapa | undefined;
+  const crudo = sinTildes(get("etapa").toLowerCase());
+  const etapa = (crudo.startsWith("agend") ? "Agendo sesion Evaluacion" : ETAPAS.find((e) => sinTildes(e.toLowerCase()) === crudo)) as Etapa | undefined;
   const nombre = get("nombre") || null;
   const previo = store.lead(tel);
   if (!previo) {
@@ -45,7 +53,8 @@ for (const fila of filas) {
   } else {
     actualizados++;
   }
-  store.actualizar(tel, { dueno, ...(etapa ? { etapa } : {}), ...(nombre ? { nombre } : {}) });
+  // Chat que ya existía en la app: el agente nunca le manda la plantilla de primer mensaje.
+  store.actualizar(tel, { dueno, historial_incompleto: 1, paso: "contactado", ...(etapa ? { etapa } : {}), ...(nombre ? { nombre } : {}) });
 }
 
 console.log(`Creados: ${creados}. Actualizados: ${actualizados}. Filas con error: ${errores.length}`);

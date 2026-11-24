@@ -14,7 +14,8 @@
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "importar-duenos": "tsx scripts/importar-duenos.ts",
-    "simular": "tsx scripts/simular.ts"
+    "simular": "tsx scripts/simular.ts",
+    "autorizar-google": "tsx scripts/autorizar-google.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^1.13.0",

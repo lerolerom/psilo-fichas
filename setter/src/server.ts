@@ -5,6 +5,7 @@ import { WhatsAppCloud } from "./whatsapp.js";
 import { AgenteSetter } from "./agent/agente.js";
 import { GoogleCalendario, SinCalendario } from "./calendario.js";
 import { Motor } from "./motor.js";
+import { WhisperLocal } from "./transcriptor.js";
 import { crearApp } from "./app.js";
 
 const store = new Store(config.DB_PATH);
@@ -16,16 +17,29 @@ const wa = new WhatsAppCloud({
 });
 
 const calendario =
-  config.GOOGLE_SERVICE_ACCOUNT_JSON && config.GOOGLE_CALENDAR_ID
-    ? new GoogleCalendario(config.GOOGLE_SERVICE_ACCOUNT_JSON, config.GOOGLE_CALENDAR_ID, config.TZ_NEGOCIO, config.feriados)
+  config.GOOGLE_REFRESH_TOKEN || config.GOOGLE_SERVICE_ACCOUNT_JSON
+    ? new GoogleCalendario(
+        {
+          clientId: config.GOOGLE_CLIENT_ID,
+          clientSecret: config.GOOGLE_CLIENT_SECRET,
+          refreshToken: config.GOOGLE_REFRESH_TOKEN,
+          serviceAccountJson: config.GOOGLE_SERVICE_ACCOUNT_JSON,
+        },
+        config.GOOGLE_CALENDAR_ID,
+        config.TZ_NEGOCIO,
+        config.feriados,
+        config.horarioEvaluaciones,
+      )
     : null;
 
 const agente = new AgenteSetter(
   new Anthropic(),
   { modelo: config.CLAUDE_MODEL, effort: config.CLAUDE_EFFORT },
   calendario ?? new SinCalendario(),
+  config.DURACION_EVALUACION_MIN,
 );
-const motor = new Motor(config, store, wa, agente, calendario);
+const transcriptor = config.WHISPER_URL ? new WhisperLocal(config.WHISPER_URL, config.WHISPER_MODELO) : null;
+const motor = new Motor(config, store, wa, agente, calendario, { transcriptor });
 
 const app = crearApp(config, store, motor);
 app.listen(config.PORT, () => {
