@@ -6,6 +6,7 @@ import { AgenteSetter } from "./agent/agente.js";
 import { GoogleCalendario, SinCalendario } from "./calendario.js";
 import { Motor } from "./motor.js";
 import { WhisperLocal } from "./transcriptor.js";
+import { MetaConversiones } from "./meta.js";
 import { crearApp } from "./app.js";
 
 const store = new Store(config.DB_PATH);
@@ -39,7 +40,18 @@ const agente = new AgenteSetter(
   config.DURACION_EVALUACION_MIN,
 );
 const transcriptor = config.WHISPER_URL ? new WhisperLocal(config.WHISPER_URL, config.WHISPER_MODELO) : null;
-const motor = new Motor(config, store, wa, agente, calendario, { transcriptor });
+const conversiones =
+  config.META_DATASET_ID && config.META_CAPI_TOKEN
+    ? new MetaConversiones({
+        datasetId: config.META_DATASET_ID,
+        token: config.META_CAPI_TOKEN,
+        wabaId: config.META_WABA_ID,
+        version: config.WA_GRAPH_VERSION,
+        nombreCrm: config.META_NOMBRE_CRM,
+        eventosWhatsapp: config.META_EVENTOS_WHATSAPP,
+      })
+    : null;
+const motor = new Motor(config, store, wa, agente, calendario, { transcriptor, conversiones });
 
 const app = crearApp(config, store, motor);
 app.listen(config.PORT, () => {

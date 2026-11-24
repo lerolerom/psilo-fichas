@@ -26,7 +26,17 @@ const Env = z.object({
   META_PAGE_ACCESS_TOKEN: z.string().default(""),
 
   // Operación
-  MODO: z.enum(["hibrido", "aprobacion", "pausado"]).default("hibrido"),
+  // sombra: recibe todo y decide, pero no envía nada (para comparar con las rondas de Chrome antes de pasar).
+  MODO: z.enum(["sombra", "hibrido", "aprobacion", "pausado"]).default("sombra"),
+  // Seguimientos fuera de las 24 h: plantillas aprobadas, o una lista con el texto propuesto que envían las rondas de Chrome.
+  SEGUIMIENTO_FUERA_DE_VENTANA: z.enum(["plantillas", "chrome"]).default("chrome"),
+  // Meta: API de Conversiones (para que Meta aprenda qué leads califican). Del Administrador de eventos.
+  META_DATASET_ID: z.string().default(""),
+  META_CAPI_TOKEN: z.string().default(""),
+  META_WABA_ID: z.string().default(""), // ID de la cuenta de WhatsApp Business (para eventos de anuncios a WhatsApp)
+  META_NOMBRE_CRM: z.string().default("Despertar Setter"),
+  // Nombre del evento que se envía por cada etapa (el de formularios usa el nombre de la etapa tal cual).
+  META_EVENTOS_WHATSAPP: z.string().default("Qualified:QualifiedLead,Agendo sesion Evaluacion:Schedule,Converted:Purchase"),
   ADMIN_NUMEROS: z.string().default(""), // números de Mario/Dani que pueden dar órdenes, formato 593XXXXXXXXX
   NOTIFICAR_A: z.string().default(""), // a quién avisar escalaciones (por defecto, ADMIN_NUMEROS)
   DUENO_POR_DEFECTO: z.enum(["MARIO", "DANI", "VERO"]).default("MARIO"),
@@ -56,6 +66,7 @@ const Env = z.object({
   FERIADOS: z.string().default(""), // YYYY-MM-DD separados por coma
   MAX_MENSAJES_HORA: z.coerce.number().default(60),
   ADMIN_API_TOKEN: z.string().default(""),
+  URL_PUBLICA: z.string().default(""), // ej. https://setter.despertar.ec (para los enlaces del panel en el reporte)
 
   // Plantillas aprobadas por Meta (fuera de la ventana de 24 h)
   PLANTILLA_IDIOMA: z.string().default("es"),

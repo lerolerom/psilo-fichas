@@ -67,6 +67,18 @@ export interface Lead {
   historial_incompleto: number; // chat anterior al sistema: nunca plantilla de primer mensaje
   fecha_acordada: string | null; // "escríbeme en enero": no se escribe antes
   responder_despues: string | null; // ISO: tiempo de "lectura" antes de contestar
+  leadgen_id: string | null; // ID del lead de formulario instantáneo (API de Conversiones para CRM)
+  ctwa_clid: string | null; // ID del clic en anuncio a WhatsApp (API de Conversiones para mensajería)
+}
+
+export interface Sombra {
+  id: number;
+  telefono: string;
+  modo: string; // respuesta | seguimiento | recordatorio | riesgo
+  ts_lead: string | null; // mensaje del lead al que responde
+  ts_propuesta: string;
+  decision: string; // JSON de la decisión del agente
+  contexto_hasta: string | null; // último mensaje que vio el agente
 }
 
 export interface Mensaje {
@@ -154,6 +166,33 @@ CREATE TABLE IF NOT EXISTS escalaciones (
   creado TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS kv (clave TEXT PRIMARY KEY, valor TEXT);
+CREATE TABLE IF NOT EXISTS sombra (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  telefono TEXT NOT NULL,
+  modo TEXT NOT NULL,
+  ts_lead TEXT,
+  ts_propuesta TEXT NOT NULL,
+  decision TEXT NOT NULL,
+  contexto_hasta TEXT
+);
+CREATE TABLE IF NOT EXISTS eventos_meta (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  telefono TEXT NOT NULL,
+  etapa TEXT NOT NULL,
+  ts TEXT NOT NULL,
+  estado TEXT NOT NULL DEFAULT 'pendiente',
+  intentos INTEGER NOT NULL DEFAULT 0,
+  error TEXT
+);
+CREATE TABLE IF NOT EXISTS para_chrome (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  telefono TEXT NOT NULL,
+  fecha TEXT NOT NULL,
+  propuesta TEXT NOT NULL,
+  motivo TEXT,
+  estado TEXT NOT NULL DEFAULT 'pendiente',
+  UNIQUE(telefono, fecha)
+);
 CREATE TABLE IF NOT EXISTS bitacora (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   telefono TEXT,
@@ -165,6 +204,8 @@ CREATE TABLE IF NOT EXISTS bitacora (
 
 export class Store {
   readonly db: Database.Database;
+  /** Se llama cada vez que cambia la etapa de un lead (para enviar el evento a Meta). */
+  onCambioEtapa?: (telefono: string, anterior: Etapa, nueva: Etapa) => void;
 
   constructor(file: string) {
     if (file !== ":memory:") fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -194,6 +235,8 @@ export class Store {
       ["leads", "historial_incompleto", "INTEGER NOT NULL DEFAULT 0"],
       ["leads", "fecha_acordada", "TEXT"],
       ["leads", "responder_despues", "TEXT"],
+      ["leads", "leadgen_id", "TEXT"],
+      ["leads", "ctwa_clid", "TEXT"],
       ["mensajes", "tipo_envio", "TEXT"],
       ["escalaciones", "avisada", "INTEGER NOT NULL DEFAULT 0"],
       ["mensajes", "media_path", "TEXT"],
@@ -231,8 +274,52 @@ export class Store {
   actualizar(telefono: string, cambios: Partial<Omit<Lead, "telefono">>): void {
     const claves = Object.keys(cambios);
     if (!claves.length) return;
+    const anterior = cambios.etapa && this.onCambioEtapa ? this.lead(telefono)?.etapa : undefined;
     const set = claves.map((k) => `${k} = @${k}`).join(", ");
     this.db.prepare(`UPDATE leads SET ${set} WHERE telefono = @telefono`).run({ ...cambios, telefono });
+    if (anterior && cambios.etapa && anterior !== cambios.etapa) this.onCambioEtapa!(telefono, anterior, cambios.etapa);
+  }
+
+  // ---------- modo sombra ----------
+  guardarSombra(s: Omit<Sombra, "id">): void {
+    this.db
+      .prepare(
+        "INSERT INTO sombra (telefono, modo, ts_lead, ts_propuesta, decision, contexto_hasta) VALUES (@telefono, @modo, @ts_lead, @ts_propuesta, @decision, @contexto_hasta)",
+      )
+      .run(s);
+  }
+
+  sombraEntre(desde: Date, hasta: Date): Sombra[] {
+    return this.db
+      .prepare("SELECT * FROM sombra WHERE ts_propuesta >= ? AND ts_propuesta < ? ORDER BY ts_propuesta")
+      .all(desde.toISOString(), hasta.toISOString()) as Sombra[];
+  }
+
+  // ---------- eventos para Meta ----------
+  encolarEventoMeta(telefono: string, etapa: string, ts: Date): void {
+    this.db.prepare("INSERT INTO eventos_meta (telefono, etapa, ts) VALUES (?, ?, ?)").run(telefono, etapa, ts.toISOString());
+  }
+
+  eventosMetaPendientes(): { id: number; telefono: string; etapa: string; ts: string; intentos: number }[] {
+    return this.db.prepare("SELECT * FROM eventos_meta WHERE estado = 'pendiente' AND intentos < 5 ORDER BY id LIMIT 50").all() as any[];
+  }
+
+  marcarEventoMeta(id: number, ok: boolean, error?: string): void {
+    if (ok) this.db.prepare("UPDATE eventos_meta SET estado = 'enviado', error = NULL WHERE id = ?").run(id);
+    else this.db.prepare("UPDATE eventos_meta SET intentos = intentos + 1, error = ? WHERE id = ?").run(error ?? null, id);
+  }
+
+  // ---------- lista para las rondas de Chrome ----------
+  agregarParaChrome(telefono: string, fecha: string, propuesta: string, motivo: string): void {
+    this.db
+      .prepare(
+        "INSERT INTO para_chrome (telefono, fecha, propuesta, motivo) VALUES (?, ?, ?, ?) ON CONFLICT(telefono, fecha) DO UPDATE SET propuesta = excluded.propuesta, motivo = excluded.motivo",
+      )
+      .run(telefono, fecha, propuesta, motivo);
+  }
+
+  listaChrome(fecha: string): { id: number; telefono: string; fecha: string; propuesta: string; motivo: string; estado: string }[] {
+    return this.db.prepare("SELECT * FROM para_chrome WHERE fecha = ? ORDER BY id").all(fecha) as any[];
   }
 
   /** Leads con mensajes sin contestar cuyo tiempo de "lectura" ya pasó. */

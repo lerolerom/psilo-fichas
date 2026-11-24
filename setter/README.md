@@ -2,6 +2,21 @@
 
 Agente que atiende leads por WhatsApp siguiendo el **Manual del Setter para IA (Claude) Despertar** y las reglas activas de **Correcciones y aprendizajes del Setter** (al 24 nov 2026), desde el primer contacto hasta que el lead paga la evaluación de $40. Usa la **WhatsApp Cloud API en coexistencia**: el número sigue funcionando en la app WhatsApp Business del celular de Mario. Reemplaza las rondas de Claude in Chrome sobre WhatsApp Web: no hay navegador, pestañas ni rondas; cada mensaje llega al instante por webhook.
 
+## Plan de paso: modo sombra primero
+
+El sistema arranca en **modo sombra** (`MODO=sombra`): el número se conecta a la API por coexistencia, las rondas de Chrome y Mario siguen trabajando como hoy, y el agente recibe cada mensaje real, decide qué haría y **no envía nada**. Cada mañana el reporte diario trae el resumen y un enlace al panel `/panel/sombra`, con tres columnas por momento: lo que escribió el lead, lo que habría enviado el agente (o a quién lo habría escalado) y lo que se envió de verdad. Cuando las propuestas sean iguales o mejores durante una o dos semanas, se apagan las rondas de respuesta y se cambia a `MODO=hibrido`. En sombra tampoco se envían etapas a Meta.
+
+## Que Meta aprenda (API de Conversiones)
+
+Cada cambio de etapa (Qualified, Agendó, Converted, Lost, Not qualified) se envía a Meta en el momento: para leads de formulario instantáneo con su ID de lead (como el Leads Center), y para los que llegaron por un anuncio que abre WhatsApp con el identificador del clic (`ctwa_clid`) del primer mensaje. Así Meta optimiza hacia leads que califican sin cambiar etapas a mano. Requiere `META_DATASET_ID` y `META_CAPI_TOKEN` del Administrador de eventos. Verificar en la documentación de Meta los nombres de eventos para mensajería antes de activarlo.
+
+## Seguimientos fuera de las 24 horas
+
+Con `SEGUIMIENTO_FUERA_DE_VENTANA=chrome`, cuando un lead lleva más de 24 horas sin escribir, el agente igual redacta el seguimiento personalizado, pero no lo envía por la API (que exigiría una plantilla fija): lo deja en la lista del día, en `/panel/seguimientos?token=...` (y en JSON en `/api/seguimientos`). Las rondas de Chrome abren esa página, verifican cada chat y envían el texto tal cual desde WhatsApp Web, donde no rige la regla de plantillas. Cuando el envío llega como eco, el sistema lo marca enviado. Con `plantillas`, se usan las plantillas aprobadas de [PLANTILLAS.md](PLANTILLAS.md).
+
+## Etiquetas de WhatsApp
+La API no lee ni pone etiquetas de la app. Para que Mario vea dueño y etapa en el celular, el puente previsto es la tarea de Chrome que ya recorre la lista de chats (pendiente, junto con el agente de redes).
+
 ## Cómo se comporta (decisiones de Mario, 24 nov 2026)
 
 - **Como una persona, no como un sistema.** No contesta al instante: espera un tiempo de "lectura" al azar (3 a 10 minutos, más si el mensaje es largo), marca el mensaje como leído, muestra "escribiendo..." el tiempo que tomaría escribir la respuesta y, si son dos mensajes, deja una pausa entre ellos. Contesta las 24 horas.
@@ -38,13 +53,13 @@ Lo que la auditora del sistema anterior encontraba después, aquí se bloquea an
 3. **Variables.** Copiar `.env.example` a `.env` y completar (cuenta para la transferencia, dirección, teléfono de Daniela, claves).
 4. **Desplegar** con `docker compose up -d` (levanta el setter y Whisper). El volumen `datos` guarda la base; el volumen `modelos`, el modelo de Whisper.
 5. **Importar los dueños y etapas** desde la hoja "CRM Leads WhatsApp Despertar" exportada a CSV: `npm run importar-duenos -- crm.csv`. Las etiquetas de la app no llegan por la API. Los chats importados quedan marcados como "con historial": nunca reciben la plantilla de primer mensaje.
-6. **Apagar las rondas de Chrome** el mismo día que se enciende este sistema, para no contestar dos veces.
+6. **Modo sombra** una o dos semanas, revisando `/panel/sombra`. Luego apagar las rondas de respuesta de Chrome, dejar solo la que envía la lista de seguimientos, y pasar a `MODO=hibrido`.
 
 ## Probar sin WhatsApp
 
 ```bash
 npm install
-npm test                                   # 47 pruebas, incluidos casos reales de la bitácora
+npm test                                   # 54 pruebas, incluidos casos reales de la bitácora
 ANTHROPIC_API_KEY=... npm run simular -- --nombre Ana --formulario "Tengo ansiedad hace años"
 ```
 

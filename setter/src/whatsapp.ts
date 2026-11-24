@@ -104,7 +104,7 @@ export type EventoWA =
       ts: Date;
       clase: string; // text | audio | image | ...
       texto: string;
-      referral: { headline?: string; body?: string; source_url?: string; source_type?: string } | null;
+      referral: { headline?: string; body?: string; source_url?: string; source_type?: string; source_id?: string; ctwa_clid?: string } | null;
       mediaId?: string;
       formulario?: string; // respuesta de un formulario dentro de WhatsApp (Flow del anuncio)
       historial?: boolean; // vino de la sincronización de historial de la coexistencia

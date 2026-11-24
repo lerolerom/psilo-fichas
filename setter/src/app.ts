@@ -4,6 +4,8 @@ import type { Store } from "./db.js";
 import type { Motor } from "./motor.js";
 import { firmaValida, leerLeadgen, parsearWebhook } from "./whatsapp.js";
 import { z } from "zod";
+import { htmlComparacion, htmlListaChrome } from "./panel.js";
+import { partesLocales } from "./tiempo.js";
 
 const LeadEntrada = z.object({
   telefono: z.string().min(7),
@@ -60,6 +62,7 @@ export function crearApp(cfg: Config, store: Store, motor: Motor) {
               formulario: l.respuestas || null,
               origen: "formulario",
               anuncio: l.adName,
+              leadgenId: ev.leadgenId,
             });
           }
         }
@@ -103,6 +106,35 @@ export function crearApp(cfg: Config, store: Store, motor: Motor) {
 
   app.get("/api/escalaciones", auth, (_req, res) => {
     res.json(store.escalacionesPendientes());
+  });
+
+  // Paneles para abrir en el navegador (token en la URL).
+  const authPanel: express.RequestHandler = (req, res, next) => {
+    if (!cfg.ADMIN_API_TOKEN || req.query.token !== cfg.ADMIN_API_TOKEN) {
+      res.sendStatus(401);
+      return;
+    }
+    next();
+  };
+  const fechaDe = (q: unknown) =>
+    typeof q === "string" && /^\d{4}-\d{2}-\d{2}$/.test(q) ? q : partesLocales(new Date(), cfg.TZ_NEGOCIO).fecha;
+
+  app.get("/panel/sombra", authPanel, (req, res) => {
+    const fecha = fechaDe(req.query.fecha);
+    const desde = new Date(`${fecha}T00:00:00-05:00`);
+    const hasta = new Date(desde.getTime() + 24 * 3600_000);
+    res.type("html").send(htmlComparacion(fecha, motor.comparacionSombra(desde, hasta)));
+  });
+
+  // Lista de seguimientos del día para las rondas de Chrome (HTML para leer en el navegador, JSON para programas).
+  const listaChrome = (fecha: string) =>
+    store.listaChrome(fecha).map((x) => ({ ...x, nombre: store.lead(x.telefono)?.nombre ?? null }));
+  app.get("/panel/seguimientos", authPanel, (req, res) => {
+    const fecha = fechaDe(req.query.fecha);
+    res.type("html").send(htmlListaChrome(fecha, listaChrome(fecha)));
+  });
+  app.get("/api/seguimientos", auth, (req, res) => {
+    res.json(listaChrome(fechaDe(req.query.fecha)));
   });
 
   return app;

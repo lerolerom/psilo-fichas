@@ -26,6 +26,7 @@ export function montar(
     ahora?: Date;
     calendario?: { crearEvaluacion: (...a: any[]) => Promise<{ link: string; meet: string | null }> } | null;
     transcripcion?: string | null;
+    conversiones?: { enviar: (...a: any[]) => Promise<"enviado" | "omitido"> } | null;
   } = {},
 ) {
   const enviados: { to: string; texto: string; plantilla?: string }[] = [];
@@ -63,6 +64,9 @@ export function montar(
     DIRECCION_CUMBAYA: "Cumbayá, lote de prueba",
     TELEFONO_DANIELA: "+593 98 000 0000",
     HORA_REPORTE_DIARIO: "23:59",
+    MODO: "hibrido",
+    SEGUIMIENTO_FUERA_DE_VENTANA: "plantillas",
+    ADMIN_API_TOKEN: "t",
     ...opts.env,
   });
 
@@ -74,6 +78,7 @@ export function montar(
     azar: () => 0.5,
     dormir: async () => {},
     transcriptor: opts.transcripcion === undefined ? null : { transcribir: async () => opts.transcripcion ?? null },
+    conversiones: (opts.conversiones as any) ?? null,
   });
   return {
     cfg,
@@ -91,8 +96,8 @@ export function montar(
     get ahora() {
       return ahora;
     },
-    entrante(de: string, texto: string, waId: string, clase = "text", mediaId?: string) {
-      return motor.procesar([{ tipo: "entrante", de, nombrePerfil: null, waId, ts: ahora, clase, texto, referral: null, mediaId }]);
+    entrante(de: string, texto: string, waId: string, clase = "text", mediaId?: string, referral: any = null) {
+      return motor.procesar([{ tipo: "entrante", de, nombrePerfil: null, waId, ts: ahora, clase, texto, referral, mediaId }]);
     },
     eco(para: string, texto: string, waId: string) {
       return motor.procesar([{ tipo: "eco", para, waId, ts: ahora, clase: "text", texto }]);

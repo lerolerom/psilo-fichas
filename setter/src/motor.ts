@@ -10,6 +10,7 @@ import { etapaFinal } from "./agent/agente.js";
 import { armarContexto, hechos } from "./contexto.js";
 import { detectarRiesgo, mensajeContencion } from "./riesgo.js";
 import type { Transcriptor } from "./transcriptor.js";
+import type { Conversiones } from "./meta.js";
 import {
   type Azar,
   DIA,
@@ -38,6 +39,21 @@ export interface OpcionesMotor {
   azar?: Azar;
   dormir?: (ms: number) => Promise<void>;
   transcriptor?: Transcriptor | null;
+  conversiones?: Conversiones | null;
+}
+
+/** Fila de la comparación del modo sombra: lo que propuso el agente frente a lo que se envió de verdad. */
+export interface FilaComparacion {
+  telefono: string;
+  nombre: string | null;
+  modo: string;
+  lead: string[]; // mensajes del lead que motivaron la propuesta
+  propuesta: string[]; // mensajes que habría enviado el agente
+  accion: string | null; // escalación, datos de pago, comprobante, plantilla, etc.
+  etapa: string | null;
+  real: { quien: string; texto: string }[]; // lo que se envió de verdad (rondas, Mario)
+  minutosReal: number | null; // cuánto tardó la respuesta real
+  minutosAgente: number | null; // cuánto habría tardado el agente (con la lectura configurada)
 }
 
 type Entrante = Extract<EventoWA, { tipo: "entrante" }>;
@@ -54,6 +70,7 @@ export class Motor {
   private azar: Azar;
   private dormir: (ms: number) => Promise<void>;
   private transcriptor: Transcriptor | null;
+  private conversiones: Conversiones | null;
 
   constructor(
     private cfg: Config,
@@ -67,9 +84,19 @@ export class Motor {
     this.azar = opts.azar ?? Math.random;
     this.dormir = opts.dormir ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.transcriptor = opts.transcriptor ?? null;
+    this.conversiones = opts.conversiones ?? null;
+    // Cada cambio de etapa se encola para Meta (en modo sombra no: las etapas reales las lleva aún el sistema anterior).
+    this.store.onCambioEtapa = (tel, _anterior, nueva) => {
+      if (this.conversiones && this.cfg.MODO !== "sombra") this.store.encolarEventoMeta(tel, nueva, this.reloj());
+    };
+  }
+
+  private get sombra(): boolean {
+    return this.cfg.MODO === "sombra";
   }
 
   private lectura(texto: string): number {
+    if (this.cfg.MODO === "sombra") return 60_000; // en sombra se propone enseguida para poder comparar
     return esperaLectura(texto.length, { min: this.cfg.LECTURA_MIN_MINUTOS, max: this.cfg.LECTURA_MAX_MINUTOS, azar: this.azar });
   }
 
@@ -119,6 +146,9 @@ export class Motor {
       );
       if (ev.nombrePerfil) this.store.actualizar(ev.de, { notas: `Nombre de perfil de WhatsApp: ${ev.nombrePerfil}` });
     }
+    if (ev.referral?.ctwa_clid && !lead.ctwa_clid) {
+      this.store.actualizar(ev.de, { ctwa_clid: ev.referral.ctwa_clid, anuncio: lead.anuncio ?? ev.referral.headline ?? null });
+    }
 
     const nuevo = this.store.guardarMensaje({
       telefono: ev.de,
@@ -165,6 +195,21 @@ export class Motor {
 
     // Riesgo: antes que cualquier otra cosa y a cualquier hora, sin pasar por el agente de ventas.
     const riesgo = detectarRiesgo(texto);
+    if (riesgo && this.sombra) {
+      this.store.guardarSombra({
+        telefono: ev.de,
+        modo: "riesgo",
+        ts_lead: ev.ts.toISOString(),
+        ts_propuesta: ahora.toISOString(),
+        decision: JSON.stringify({
+          mensajes: riesgo === "alto" ? [{ texto: mensajeContencion(lead.nombre) }] : [],
+          accion: `Riesgo ${riesgo}: chat en pausa y alerta urgente a Mario`,
+        }),
+        contexto_hasta: ev.ts.toISOString(),
+      });
+      this.store.actualizar(ev.de, cambios);
+      return;
+    }
     if (riesgo) {
       this.store.actualizar(ev.de, { ...cambios, pausado: 1, motivo_pausa: `riesgo ${riesgo}`, pendiente_desde: null });
       const lead2 = this.store.lead(ev.de)!;
@@ -268,13 +313,17 @@ export class Motor {
     // Mario contestó desde la app: ese mensaje queda en la conversación (el agente lo lee y sigue desde ahí).
     // Lo pendiente se da por atendido y, si el lead responde enseguida, se le da a Mario unos minutos de margen.
     void primeroNuestro;
+    // ¿Era el seguimiento de hoy que dejó el sistema para las rondas de Chrome? Cuenta como un toque.
+    const hoy = partesLocales(ahora, this.cfg.TZ_NEGOCIO).fecha;
+    const deChrome = this.store.listaChrome(hoy).find((x) => x.telefono === ev.para && x.estado === "pendiente");
+    if (deChrome) this.store.db.prepare("UPDATE para_chrome SET estado = 'enviado' WHERE id = ?").run(deChrome.id);
+    const l = this.store.lead(ev.para)!;
     this.store.actualizar(ev.para, {
       humano_hasta: new Date(ahora.getTime() + this.cfg.ESPERA_TRAS_MARIO_MINUTOS * 60_000).toISOString(),
-      pendiente_desde: null,
-      responder_despues: null,
+      // En sombra se mantiene lo pendiente para que el agente igual proponga (y se compare con esto).
+      ...(this.sombra ? {} : { pendiente_desde: null, responder_despues: null }),
       ultimo_out: ahora.toISOString(),
-      intentos_sin_respuesta: 0,
-      proximo_toque: this.calcularProximoToque({ ...lead, intentos_sin_respuesta: 0 }, ahora),
+      proximo_toque: this.calcularProximoToque(l, ahora),
     });
   }
 
@@ -286,6 +335,7 @@ export class Motor {
     origen: "formulario" | "abandonado" | "instagram";
     anuncio: string | null;
     dueno?: Dueno;
+    leadgenId?: string;
   }): Promise<Lead> {
     const tel = normalizarTelefono(datos.telefono);
     const ahora = this.reloj();
@@ -306,7 +356,7 @@ export class Motor {
       ahora,
     );
     // Primer contacto (abandonados incluidos: "estos leads sí se escriben"), tras un tiempo de "lectura".
-    this.store.actualizar(tel, { proximo_toque: new Date(ahora.getTime() + this.lectura(datos.formulario ?? "")).toISOString() });
+    this.store.actualizar(tel, { leadgen_id: datos.leadgenId ?? null, proximo_toque: new Date(ahora.getTime() + this.lectura(datos.formulario ?? "")).toISOString() });
     return this.store.lead(tel)!;
   }
 
@@ -323,7 +373,7 @@ export class Motor {
     // 1) Respuestas, a cualquier hora, cuando pasó el tiempo de "lectura".
     for (const lead of this.store.leadsListosParaResponder(ahora)) {
       if (!this.hayCupo(ahora)) break;
-      if (lead.humano_hasta && new Date(lead.humano_hasta) > ahora) continue;
+      if (!this.sombra && lead.humano_hasta && new Date(lead.humano_hasta) > ahora) continue;
       tareas.push(this.conCandado(lead.telefono, () => this.turno(lead.telefono, "respuesta")));
     }
 
@@ -336,7 +386,27 @@ export class Motor {
     }
     await Promise.all(tareas);
 
-    this.reglasDePaso(ahora);
+    if (!this.sombra) this.reglasDePaso(ahora);
+    await this.enviarEventosMeta();
+  }
+
+  /** Envía a Meta los cambios de etapa encolados (con reintentos). */
+  private async enviarEventosMeta(): Promise<void> {
+    if (!this.conversiones) return;
+    for (const e of this.store.eventosMetaPendientes()) {
+      const lead = this.store.lead(e.telefono);
+      if (!lead) {
+        this.store.marcarEventoMeta(e.id, true);
+        continue;
+      }
+      try {
+        const r = await this.conversiones.enviar(lead, e.etapa, new Date(e.ts));
+        this.store.marcarEventoMeta(e.id, true);
+        if (r === "enviado") this.store.log(e.telefono, "meta_evento", e.etapa);
+      } catch (err) {
+        this.store.marcarEventoMeta(e.id, false, String(err));
+      }
+    }
   }
 
   private hayCupo(ahora: Date): boolean {
@@ -389,14 +459,19 @@ export class Motor {
     };
   }
 
-  private async turno(tel: string, modo: Modo): Promise<void> {
+  private async turno(tel: string, modo: Modo, opciones?: { destino?: "chrome" }): Promise<void> {
     const lead = this.store.lead(tel);
     if (!lead || lead.pausado || lead.dueno === "VERO") {
       if (lead) this.store.actualizar(tel, { pendiente_desde: null });
       return;
     }
     const ahora = this.reloj();
-    const mensajes = this.store.mensajes(tel);
+    let mensajes = this.store.mensajes(tel);
+    // En sombra, el agente ve la conversación hasta el último mensaje del lead (no lo que ya respondieron las rondas).
+    if (this.sombra && modo === "respuesta") {
+      const ultimoIn = mensajes.map((m) => m.direccion).lastIndexOf("in");
+      if (ultimoIn >= 0) mensajes = mensajes.slice(0, ultimoIn + 1);
+    }
     const h = hechos(lead, mensajes, this.cfg.VIDEO_EDUCATIVO_URL);
     const texto = armarContexto(lead, mensajes, { modo, ahora, tz: this.cfg.TZ_NEGOCIO, material: this.material(lead) });
 
@@ -419,7 +494,48 @@ export class Motor {
     });
     this.store.log(tel, "decision", JSON.stringify(d));
     this.store.actualizar(tel, { pendiente_desde: null, responder_despues: null });
+    if (this.sombra) {
+      this.store.guardarSombra({
+        telefono: tel,
+        modo: opciones?.destino === "chrome" ? "seguimiento (para Chrome)" : modo,
+        ts_lead: respondeA,
+        ts_propuesta: ahora.toISOString(),
+        decision: JSON.stringify(d),
+        contexto_hasta: mensajes.at(-1)?.ts ?? null,
+      });
+      // Solo datos inofensivos: el estado real del lead lo siguen llevando las rondas y Mario.
+      for (const x of d.datos) {
+        if (x.campo === "nombre" && !lead.nombre) this.store.actualizar(tel, { nombre: x.valor });
+      }
+      if (modo !== "respuesta") {
+        const l = this.store.lead(tel)!;
+        this.store.actualizar(tel, { intentos_sin_respuesta: l.intentos_sin_respuesta + 1, proximo_toque: this.calcularProximoToque({ ...l, intentos_sin_respuesta: l.intentos_sin_respuesta + 1 }, ahora) });
+      }
+      return;
+    }
+    if (opciones?.destino === "chrome") return this.dejarParaChrome(lead, d, ahora);
     await this.aplicar(lead, d, modo, respondeA);
+  }
+
+  /** Seguimiento fuera de la ventana de 24 h: el agente lo redacta y lo envían las rondas de Chrome. */
+  private async dejarParaChrome(lead: Lead, d: Decision, ahora: Date): Promise<void> {
+    const tel = lead.telefono;
+    if (d.escalacion) {
+      await this.escalar(lead, { categoria: d.escalacion.categoria, motivo: d.escalacion.motivo, propuesta: d.escalacion.propuesta || null });
+      return;
+    }
+    const texto = d.mensajes.map((m) => m.texto).join("\n\n");
+    const l = this.store.lead(tel)!;
+    const intentos = l.intentos_sin_respuesta + 1;
+    if (texto) {
+      const motivo = `${l.paso}, ${diasDesde(l.ultimo_in ?? l.creado, ahora)} días sin respuesta`;
+      this.store.agregarParaChrome(tel, partesLocales(ahora, this.cfg.TZ_NEGOCIO).fecha, texto, motivo);
+    }
+    this.store.actualizar(tel, {
+      intentos_sin_respuesta: intentos,
+      paso: l.paso === "nuevo" ? "contactado" : l.paso,
+      proximo_toque: this.calcularProximoToque({ ...l, intentos_sin_respuesta: intentos }, ahora),
+    });
   }
 
   private async aplicar(lead: Lead, d: Decision, modo: Modo, respondeA: string | null): Promise<void> {
@@ -608,6 +724,7 @@ export class Motor {
       if (!toca || l.recordatorio_cita === hoy) continue;
       this.store.actualizar(l.telefono, { recordatorio_cita: hoy });
       await this.conCandado(l.telefono, async () => {
+        if (this.sombra) return; // las citas reales las recuerda aún el sistema anterior
         if (ventanaAbierta(l.ultimo_in, ahora)) return this.turno(l.telefono, "recordatorio");
         const nombre = (l.nombre ?? "").split(" ")[0] || "hola";
         const hora = new Date(l.cita!).toLocaleTimeString("es-EC", { timeZone: this.cfg.TZ_NEGOCIO, hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
@@ -637,7 +754,10 @@ export class Motor {
     // Dentro de las 24 h desde su último mensaje: el agente redacta un toque a medida.
     if (ventanaAbierta(lead.ultimo_in, ahora)) return this.turno(tel, "seguimiento");
 
-    // Fuera de la ventana: solo plantillas aprobadas por Meta.
+    // Fuera de la ventana: el agente lo redacta y lo envían las rondas de Chrome (la app no tiene la regla de plantillas)...
+    if (this.cfg.SEGUIMIENTO_FUERA_DE_VENTANA === "chrome") return this.turno(tel, "seguimiento", { destino: "chrome" });
+
+    // ...o, si se eligió así, solo plantillas aprobadas por Meta.
     const nombre = (lead.nombre ?? "").split(" ")[0] || "hola";
     const silencio = diasDesde(lead.ultimo_in ?? lead.creado, ahora);
     const yaEnviada = (p: string) => this.store.mensajes(tel, 500).some((m) => m.texto.startsWith(`[plantilla ${p}]`));
@@ -730,6 +850,17 @@ export class Motor {
   }
 
   private async enviarPlantilla(lead: Lead, plantilla: string, params: string[]): Promise<void> {
+    if (this.sombra) {
+      this.store.guardarSombra({
+        telefono: lead.telefono,
+        modo: "plantilla",
+        ts_lead: null,
+        ts_propuesta: this.reloj().toISOString(),
+        decision: JSON.stringify({ accion: `Plantilla ${plantilla}`, mensajes: [{ texto: params.join(" | ") }] }),
+        contexto_hasta: null,
+      });
+      return;
+    }
     const waId = await this.wa.enviarPlantilla(lead.telefono, plantilla, params);
     const ts = this.reloj().toISOString();
     this.store.guardarMensaje({
@@ -801,7 +932,53 @@ export class Motor {
     await this.notificar(this.reporteDiario(ahora));
   }
 
+  /** Lado a lado: lo que habría hecho el agente y lo que se envió de verdad (rondas de Chrome, Mario). */
+  comparacionSombra(desde: Date, hasta: Date): FilaComparacion[] {
+    const filas: FilaComparacion[] = [];
+    for (const s of this.store.sombraEntre(desde, hasta)) {
+      const d = JSON.parse(s.decision);
+      const lead = this.store.lead(s.telefono);
+      const msgs = this.store.mensajes(s.telefono, 500);
+      const corte = s.contexto_hasta ?? s.ts_propuesta;
+      // Mensajes del lead de esta ráfaga: los "in" seguidos hasta el corte.
+      const previos = msgs.filter((m) => m.ts <= corte);
+      const delLead: string[] = [];
+      for (let i = previos.length - 1; i >= 0 && previos[i].direccion === "in"; i--) delLead.unshift(previos[i].texto || `[${previos[i].tipo}]`);
+      // Respuesta real: lo nuestro (rondas o Mario) después del corte y antes del siguiente mensaje del lead.
+      const real: { quien: string; texto: string }[] = [];
+      let primerReal: string | null = null;
+      for (const m of msgs.filter((x) => x.ts > corte)) {
+        if (m.direccion === "in") break;
+        if (m.direccion === "eco" || m.direccion === "out") {
+          real.push({ quien: m.direccion === "eco" ? "app (rondas o Mario)" : m.autor ?? "sistema", texto: m.texto });
+          primerReal ??= m.ts;
+        }
+      }
+      const accion = d.accion
+        ?? (d.escalacion ? `Escala a Mario (${d.escalacion.categoria}): ${d.escalacion.motivo}${d.escalacion.propuesta ? ` | Propuesta: ${d.escalacion.propuesta}` : ""}` : null)
+        ?? (d.datosPago ? `Envía cuenta y formulario para ${d.datosPago.fechaHora} (${d.datosPago.modalidad})` : null)
+        ?? (d.comprobante ? `Registra comprobante y agenda (${d.comprobante})` : null)
+        ?? (d.noResponder ? `No responde: ${d.noResponder}` : null)
+        ?? (d.rechazo ? "El modelo no generó respuesta" : null);
+      const base = s.ts_lead ?? s.ts_propuesta;
+      filas.push({
+        telefono: s.telefono,
+        nombre: lead?.nombre ?? null,
+        modo: s.modo,
+        lead: delLead,
+        propuesta: (d.mensajes ?? []).map((m: { texto: string }) => m.texto),
+        accion,
+        etapa: d.etapa ?? null,
+        real,
+        minutosReal: primerReal ? Math.round((new Date(primerReal).getTime() - new Date(base).getTime()) / 60_000) : null,
+        minutosAgente: s.ts_lead ? Math.round((this.cfg.LECTURA_MIN_MINUTOS + this.cfg.LECTURA_MAX_MINUTOS) / 2) : null,
+      });
+    }
+    return filas;
+  }
+
   reporteDiario(ahora: Date): string {
+    if (this.sombra) return this.reporteSombra(ahora);
     const tz = this.cfg.TZ_NEGOCIO;
     const p = partesLocales(ahora, tz);
     const inicioHoy = new Date(`${p.fecha}T00:00:00-05:00`);
@@ -853,6 +1030,27 @@ export class Motor {
             : ""),
     );
     return lineas.join("\n");
+  }
+
+  private reporteSombra(ahora: Date): string {
+    const p = partesLocales(ahora, this.cfg.TZ_NEGOCIO);
+    const inicioHoy = new Date(`${p.fecha}T00:00:00-05:00`);
+    const inicioAyer = new Date(inicioHoy.getTime() - DIA);
+    const filas = this.comparacionSombra(inicioAyer, inicioHoy);
+    const respuestas = filas.filter((f) => f.modo === "respuesta");
+    const sinReal = respuestas.filter((f) => !f.real.length).length;
+    const tiempos = respuestas.map((f) => f.minutosReal).filter((x): x is number => x != null).sort((a, b) => a - b);
+    const escaladas = filas.filter((f) => f.accion?.startsWith("Escala")).length;
+    const fecha = partesLocales(inicioAyer, this.cfg.TZ_NEGOCIO).fecha;
+    const enlace = this.cfg.URL_PUBLICA ? `${this.cfg.URL_PUBLICA.replace(/\/$/, "")}/panel/sombra?fecha=${fecha}&token=${this.cfg.ADMIN_API_TOKEN}` : "(configura URL_PUBLICA para el enlace)";
+    return [
+      `Modo sombra, ayer: el agente revisó ${filas.length} momentos sin enviar nada.`,
+      `${respuestas.length} respuestas propuestas, ${escaladas} casos que habría dejado a Mario, ${filas.filter((f) => f.modo === "riesgo").length} alertas de riesgo.`,
+      tiempos.length ? `Respuesta real (rondas o Mario): mediana ${tiempos[Math.floor(tiempos.length / 2)]} min, la más lenta ${tiempos.at(-1)} min. ${sinReal} mensajes de leads sin respuesta real.` : "",
+      `Comparación lado a lado: ${enlace}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
   }
 
   // =====================================================================
