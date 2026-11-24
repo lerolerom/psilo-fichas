@@ -1,9 +1,7 @@
-import type { Paso } from "./db.js";
-
 export interface Horario {
   tz: string;
-  horaInicio: number; // 8 -> desde las 08:00
-  horaFin: number; // 21 -> hasta las 20:59
+  horaInicio: number; // respuestas: desde
+  horaFin: number; // respuestas: hasta (exclusivo)
   feriados: Set<string>; // YYYY-MM-DD
 }
 
@@ -31,9 +29,24 @@ export function partesLocales(d: Date, tz: string) {
   };
 }
 
+export function minutosDelDia(d: Date, tz: string): number {
+  const p = partesLocales(d, tz);
+  return p.hora * 60 + p.minuto;
+}
+
+export function esFinDeSemana(d: Date, tz: string): boolean {
+  const w = partesLocales(d, tz).diaSemana;
+  return w === "Sat" || w === "Sun";
+}
+
 export function esDiaHabil(d: Date, h: Horario): boolean {
-  const p = partesLocales(d, h.tz);
-  return p.diaSemana !== "Sat" && p.diaSemana !== "Sun" && !h.feriados.has(p.fecha);
+  return !esFinDeSemana(d, h.tz) && !h.feriados.has(partesLocales(d, h.tz).fecha);
+}
+
+export function enRango(d: Date, tz: string, r: [number, number] | null): boolean {
+  if (!r) return false;
+  const m = minutosDelDia(d, tz);
+  return m >= r[0] && m < r[1];
 }
 
 export function dentroDeHorario(d: Date, h: Horario): boolean {
@@ -41,7 +54,7 @@ export function dentroDeHorario(d: Date, h: Horario): boolean {
   return hora >= h.horaInicio && hora < h.horaFin;
 }
 
-/** Siguiente momento permitido para escribir (avanza de a 15 minutos; simple y sin sorpresas de zona horaria). */
+/** Siguiente momento dentro de [horaInicio, horaFin) (avanza de a 15 minutos). */
 export function siguienteMomentoPermitido(desde: Date, h: Horario, soloDiaHabil: boolean): Date {
   let t = new Date(desde.getTime());
   for (let i = 0; i < 4 * 24 * 15; i++) {
@@ -52,45 +65,45 @@ export function siguienteMomentoPermitido(desde: Date, h: Horario, soloDiaHabil:
 }
 
 /**
- * Ventana de seguimiento del manual v2 (la etapa define qué se manda; el tiempo, cuándo).
- * Devuelve la espera desde el último mensaje nuestro, según cuántos toques sin respuesta van.
- * Después de cuatro intentos sin respuesta: ritmo mensual.
+ * Cadencia del manual vigente (sección 7 y decisiones del 19 y 23 nov 2026):
+ * un mensaje por lead por día, siempre con algo nuevo; si el lead lleva más de una semana sin responder,
+ * cada 2 o 3 días (aquí: 3). Sigue en Intake, Qualified, Not qualified y Lost hasta un no explícito.
+ * Los plazos de 14 y 21 días solo cambian la etapa.
  */
-export function esperaSeguimiento(paso: Paso, intentos: number): number | null {
-  if (intentos >= 4) return 30 * D;
-  switch (paso) {
-    case "contactado":
-      // mismo día, día 2, día 4, día 8 (acumulado desde el primer contacto)
-      return [4 * H, 2 * D - 4 * H, 2 * D, 4 * D][intentos];
-    case "abrio":
-    case "conectado":
-    case "educado":
-      return [1 * D, 3 * D, 3 * D, 3 * D][intentos];
-    case "ofrecido":
-      return [1 * D, 2 * D, 5 * D, 5 * D][intentos];
-    case "comprometido":
-      // mismo día; luego Mario sigue el pago y la cita
-      return intentos === 0 ? 4 * H : null;
-    default:
-      return null; // nuevo, agendado, cerrado: sin seguimiento automático
-  }
+export function esperaSeguimiento(diasSinRespuesta: number): number {
+  return diasSinRespuesta >= 7 ? 3 * D : 1 * D;
 }
 
-export function proximoToque(
-  paso: Paso,
-  intentos: number,
-  ultimoOut: Date,
-  h: Horario,
-): Date | null {
-  const espera = esperaSeguimiento(paso, intentos);
-  if (espera == null) return null;
-  return siguienteMomentoPermitido(new Date(ultimoOut.getTime() + espera), h, true);
+export function proximoToque(ultimoOut: Date, diasSinRespuesta: number, hSeguimiento: Horario, fechaAcordada?: string | null): Date {
+  let t = new Date(ultimoOut.getTime() + esperaSeguimiento(diasSinRespuesta));
+  if (fechaAcordada) {
+    const acordada = new Date(`${fechaAcordada}T08:00:00-05:00`);
+    if (acordada > t) t = acordada;
+  }
+  return siguienteMomentoPermitido(t, hSeguimiento, false);
 }
 
 /** ¿Seguimos dentro de la ventana de atención de 24 h desde el último mensaje del lead? */
 export function ventanaAbierta(ultimoIn: string | null, ahora: Date, margenMin = 10): boolean {
   if (!ultimoIn) return false;
   return ahora.getTime() - new Date(ultimoIn).getTime() < D - margenMin * 60_000;
+}
+
+export function diasDesde(iso: string | null, ahora: Date): number {
+  if (!iso) return 0;
+  return Math.floor((ahora.getTime() - new Date(iso).getTime()) / D);
+}
+
+/** "2026-11-27T15:00" (hora de Quito) -> Date. Ecuador no tiene horario de verano. */
+export function desdeLocal(fechaHora: string): Date {
+  return new Date(`${fechaHora}:00-05:00`);
+}
+
+export function formatoCita(iso: string, tz: string): string {
+  const d = new Date(iso);
+  const dia = d.toLocaleDateString("es-EC", { timeZone: tz, weekday: "long", day: "numeric", month: "long" });
+  const hora = d.toLocaleTimeString("es-EC", { timeZone: tz, hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  return `${dia} a las ${hora}`;
 }
 
 export const DIA = D;

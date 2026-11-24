@@ -1,23 +1,35 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { ETAPAS, PASOS } from "../db.js";
+import { ETAPAS, PASOS, TIPOS_ENVIO } from "../db.js";
 
 export const CATEGORIAS = [
   "riesgo",
   "medicacion",
   "clinica",
-  "beca",
   "fuera_de_quito",
   "familiar",
   "legal",
   "menor",
   "adiccion",
+  "beca",
+  "precio_detalle",
+  "ya_hizo_proceso",
+  "pregunta_identidad",
+  "audio",
+  "historial",
   "caliente",
-  "pago",
-  "precio_completo",
-  "presentacion_dani",
-  "audio_o_medio",
+  "reclamo",
   "otro",
+] as const;
+
+export const CAMPOS_DATO = [
+  "nombre",
+  "ciudad",
+  "nota",
+  "aprendizaje",
+  "no_explicito",
+  "fecha_acordada",
+  "oferta_dani",
 ] as const;
 
 const nullable = (t: string) => ({ type: [t, "null"] });
@@ -27,37 +39,32 @@ export const HERRAMIENTAS: Anthropic.Beta.BetaTool[] = [
   {
     name: "enviar_mensaje",
     description:
-      "Envía un mensaje de texto al lead por WhatsApp. Máximo dos por turno. Escribe con el estilo del manual: corto, sin emojis, sin viñetas, cierra con una pregunta o una línea breve.",
+      "Envía un mensaje de texto al lead por WhatsApp. Máximo dos por turno. El sistema revisa identidad, estilo y precios; si te lo devuelve con un error, corrígelo y vuelve a llamar.",
     strict: true,
     input_schema: {
       type: "object",
-      properties: { texto: { type: "string", description: "Texto exacto a enviar." } },
-      required: ["texto"],
+      properties: {
+        texto: { type: "string", description: "Texto exacto a enviar." },
+        tipo: { type: "string", enum: [...TIPOS_ENVIO], description: "Etiqueta de aprendizaje del manual." },
+        profundizar: { type: "boolean", description: "true si es una pregunta de profundizar el dolor (cuenta para el tope de 3)." },
+        reflejo: { type: "boolean", description: "true si es el mensaje de reflejo del paso 4." },
+      },
+      required: ["texto", "tipo", "profundizar", "reflejo"],
       additionalProperties: false,
     },
   },
   {
-    name: "enviar_video_educativo",
-    description:
-      "Envía el video educativo sobre terapia asistida con psilocibina. Úsalo solo al pasar de Connect a Educado y solo si la ficha dice que no se envió antes.",
-    strict: true,
-    input_schema: { type: "object", properties: {}, required: [], additionalProperties: false },
-  },
-  {
     name: "escalar_a_mario",
     description:
-      "Pasa el caso a Mario con una propuesta de respuesta lista para enviar. Pausa el chat hasta que Mario decida. No envíes mensajes al lead en el mismo turno salvo enviar_tambien=true (solo para categoria 'caliente' o para preguntar si está en Quito).",
+      "Deja el caso a Mario con una propuesta de respuesta lista para enviar. El chat queda en pausa hasta que Mario decida. No envíes mensajes en el mismo turno salvo enviar_tambien=true (solo 'caliente').",
     strict: true,
     input_schema: {
       type: "object",
       properties: {
         categoria: { type: "string", enum: [...CATEGORIAS] },
-        motivo: { type: "string", description: "Una línea con el motivo." },
-        propuesta: { type: "string", description: "Respuesta propuesta para el lead, lista para enviar." },
-        enviar_tambien: {
-          type: "boolean",
-          description: "true si además envías tus mensajes de este turno al lead (solo 'caliente').",
-        },
+        motivo: { type: "string", description: "Una línea: qué dijo el lead y por qué lo decide Mario." },
+        propuesta: { type: "string", description: "Respuesta propuesta para el lead, lista para enviar (vacío si no aplica)." },
+        enviar_tambien: { type: "boolean" },
       },
       required: ["categoria", "motivo", "propuesta", "enviar_tambien"],
       additionalProperties: false,
@@ -65,7 +72,7 @@ export const HERRAMIENTAS: Anthropic.Beta.BetaTool[] = [
   },
   {
     name: "actualizar_etapa",
-    description: "Actualiza la etapa de Meta y/o el paso de la conversación. Nunca bajes una etapa.",
+    description: "Actualiza la etapa (Meta/WhatsApp) y/o el paso de la conversación.",
     strict: true,
     input_schema: {
       type: "object",
@@ -79,13 +86,14 @@ export const HERRAMIENTAS: Anthropic.Beta.BetaTool[] = [
     },
   },
   {
-    name: "guardar_dato",
-    description: "Guarda un dato del lead (nombre, ciudad, nota) o un aprendizaje para el manual.",
+    name: "registrar_dato",
+    description:
+      "Guarda un dato del lead. nombre/ciudad/nota: texto. no_explicito: el lead dijo que no a todo (sale del seguimiento). fecha_acordada: AAAA-MM-DD, no se le escribe antes. oferta_dani: ofrecida | aceptada | rechazada. aprendizaje: propuesta para el manual.",
     strict: true,
     input_schema: {
       type: "object",
       properties: {
-        campo: { type: "string", enum: ["nombre", "ciudad", "nota", "aprendizaje"] },
+        campo: { type: "string", enum: [...CAMPOS_DATO] },
         valor: { type: "string" },
       },
       required: ["campo", "valor"],
@@ -95,12 +103,39 @@ export const HERRAMIENTAS: Anthropic.Beta.BetaTool[] = [
   {
     name: "consultar_disponibilidad",
     description:
-      "Revisa el calendario de evaluaciones para una fecha (entre semana, hasta las 19:00, hora de Ecuador). Devuelve los bloques ocupados.",
+      "Revisa el calendario principal de Mario para una fecha (macrodosis, sesiones, evaluaciones). Devuelve los bloques ocupados. Úsalo antes de aceptar o confirmar cualquier día y hora.",
     strict: true,
     input_schema: {
       type: "object",
-      properties: { fecha: { type: "string", description: "YYYY-MM-DD" } },
+      properties: { fecha: { type: "string", description: "AAAA-MM-DD" } },
       required: ["fecha"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "enviar_datos_pago",
+    description:
+      "El lead eligió un día y hora libres: el sistema le envía la cuenta para la transferencia de $40 con el texto aprobado y el formulario previo, y guarda la cita. No escribas tú los datos bancarios.",
+    strict: true,
+    input_schema: {
+      type: "object",
+      properties: {
+        fecha_hora: { type: "string", description: "AAAA-MM-DDTHH:MM, hora de Quito" },
+        modalidad: { type: "string", enum: ["en línea", "presencial"] },
+      },
+      required: ["fecha_hora", "modalidad"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "registrar_comprobante",
+    description:
+      "El lead envió el comprobante de la transferencia de $40 para la cita ya acordada: el sistema crea la evaluación en el calendario, la confirma al lead, pide el formulario y envía la dirección si es presencial. Solo si ves el comprobante (imagen o PDF) o un aviso inequívoco de pago.",
+    strict: true,
+    input_schema: {
+      type: "object",
+      properties: { evidencia: { type: "string", description: "Qué viste: monto, banco, fecha." } },
+      required: ["evidencia"],
       additionalProperties: false,
     },
   },
@@ -118,8 +153,12 @@ export const HERRAMIENTAS: Anthropic.Beta.BetaTool[] = [
 ];
 
 export const Entradas = {
-  enviar_mensaje: z.object({ texto: z.string().min(1).max(1500) }),
-  enviar_video_educativo: z.object({}).passthrough(),
+  enviar_mensaje: z.object({
+    texto: z.string().min(1).max(1500),
+    tipo: z.enum(TIPOS_ENVIO),
+    profundizar: z.boolean(),
+    reflejo: z.boolean(),
+  }),
   escalar_a_mario: z.object({
     categoria: z.enum(CATEGORIAS),
     motivo: z.string(),
@@ -131,8 +170,13 @@ export const Entradas = {
     paso: z.enum(PASOS).nullable(),
     razon: z.string(),
   }),
-  guardar_dato: z.object({ campo: z.enum(["nombre", "ciudad", "nota", "aprendizaje"]), valor: z.string() }),
+  registrar_dato: z.object({ campo: z.enum(CAMPOS_DATO), valor: z.string() }),
   consultar_disponibilidad: z.object({ fecha: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }),
+  enviar_datos_pago: z.object({
+    fecha_hora: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/),
+    modalidad: z.enum(["en línea", "presencial"]),
+  }),
+  registrar_comprobante: z.object({ evidencia: z.string() }),
   no_responder: z.object({ motivo: z.string() }),
 } as const;
 

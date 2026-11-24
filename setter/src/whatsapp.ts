@@ -6,6 +6,8 @@ export interface WhatsApp {
   enviarTexto(to: string, texto: string): Promise<string>;
   enviarPlantilla(to: string, nombre: string, params: string[]): Promise<string>;
   marcarLeido(waMessageId: string): Promise<void>;
+  /** Descarga un adjunto (imagen, PDF). Devuelve null si no se puede. */
+  descargarMedia?(mediaId: string): Promise<{ mime: string; data: Buffer } | null>;
 }
 
 export class WhatsAppCloud implements WhatsApp {
@@ -57,6 +59,17 @@ export class WhatsAppCloud implements WhatsApp {
   async marcarLeido(waMessageId: string): Promise<void> {
     await this.post({ messaging_product: "whatsapp", status: "read", message_id: waMessageId });
   }
+
+  async descargarMedia(mediaId: string): Promise<{ mime: string; data: Buffer } | null> {
+    const auth = { Authorization: `Bearer ${this.opts.token}` };
+    const meta = await fetch(`https://graph.facebook.com/${this.opts.version}/${mediaId}`, { headers: auth });
+    if (!meta.ok) return null;
+    const j: any = await meta.json();
+    if (!j.url) return null;
+    const bin = await fetch(j.url, { headers: auth });
+    if (!bin.ok) return null;
+    return { mime: String(j.mime_type ?? bin.headers.get("content-type") ?? ""), data: Buffer.from(await bin.arrayBuffer()) };
+  }
 }
 
 /** Valida X-Hub-Signature-256 (HMAC SHA-256 del cuerpo crudo con el App Secret). */
@@ -81,8 +94,11 @@ export type EventoWA =
       clase: string; // text | audio | image | ...
       texto: string;
       referral: { headline?: string; body?: string; source_url?: string; source_type?: string } | null;
+      mediaId?: string;
+      formulario?: string; // respuesta de un formulario dentro de WhatsApp (Flow del anuncio)
+      historial?: boolean; // vino de la sincronización de historial de la coexistencia
     }
-  | { tipo: "eco"; para: string; waId: string; ts: Date; clase: string; texto: string }
+  | { tipo: "eco"; para: string; waId: string; ts: Date; clase: string; texto: string; historial?: boolean }
   | { tipo: "estado"; waId: string; estado: string; para: string; error?: string }
   | { tipo: "leadgen"; leadgenId: string; formId?: string; adId?: string };
 
@@ -93,6 +109,7 @@ function textoDe(m: any): string {
     case "button":
       return m.button?.text ?? "";
     case "interactive":
+      if (m.interactive?.nfm_reply) return formularioDe(m) ?? "[formulario]";
       return m.interactive?.button_reply?.title ?? m.interactive?.list_reply?.title ?? "";
     case "image":
     case "video":
@@ -103,6 +120,25 @@ function textoDe(m: any): string {
     default:
       return "";
   }
+}
+
+/** Respuesta de un formulario (WhatsApp Flow) del anuncio: "pregunta: respuesta" por línea. */
+function formularioDe(m: any): string | undefined {
+  const raw = m?.interactive?.nfm_reply?.response_json;
+  if (!raw) return undefined;
+  try {
+    const j = typeof raw === "string" ? JSON.parse(raw) : raw;
+    const lineas = Object.entries(j)
+      .filter(([k]) => k !== "flow_token")
+      .map(([k, v]) => `${k.replace(/_/g, " ")}: ${Array.isArray(v) ? v.join(", ") : String(v)}`);
+    return lineas.join("\n") || undefined;
+  } catch {
+    return String(raw);
+  }
+}
+
+function mediaIdDe(m: any): string | undefined {
+  return m?.image?.id ?? m?.document?.id ?? m?.audio?.id ?? m?.video?.id ?? m?.sticker?.id;
 }
 
 function fecha(ts: unknown): Date {
@@ -144,6 +180,8 @@ export function parsearWebhook(body: any): EventoWA[] {
           clase: String(m.type ?? "unknown"),
           texto: textoDe(m),
           referral: m.referral ?? null,
+          mediaId: mediaIdDe(m),
+          formulario: formularioDe(m),
         });
       }
 
@@ -158,6 +196,32 @@ export function parsearWebhook(body: any): EventoWA[] {
         });
       }
 
+      // Sincronización de historial al activar la coexistencia: mensajes viejos del chat.
+      if (field === "history") {
+        const propio = normalizarTelefono(String(v.metadata?.display_phone_number ?? ""));
+        for (const m of mensajesAnidados(v)) {
+          const de = normalizarTelefono(String(m.from ?? ""));
+          const para = normalizarTelefono(String(m.to ?? ""));
+          const nuestro = (propio && de === propio) || m.from_me === true || m.history_context?.from_me === true;
+          if (nuestro && para) {
+            eventos.push({ tipo: "eco", para, waId: String(m.id), ts: fecha(m.timestamp), clase: String(m.type ?? "unknown"), texto: textoDe(m), historial: true });
+          } else if (de) {
+            eventos.push({
+              tipo: "entrante",
+              de,
+              nombrePerfil: null,
+              waId: String(m.id),
+              ts: fecha(m.timestamp),
+              clase: String(m.type ?? "unknown"),
+              texto: textoDe(m),
+              referral: null,
+              historial: true,
+            });
+          }
+        }
+        continue;
+      }
+
       for (const s of v.statuses ?? []) {
         eventos.push({
           tipo: "estado",
@@ -170,6 +234,21 @@ export function parsearWebhook(body: any): EventoWA[] {
     }
   }
   return eventos;
+}
+
+/** Busca mensajes (objetos con id, timestamp y from/to) en cualquier nivel del payload de historial. */
+function mensajesAnidados(v: any, out: any[] = [], prof = 0): any[] {
+  if (!v || typeof v !== "object" || prof > 8) return out;
+  if (Array.isArray(v)) {
+    for (const x of v) mensajesAnidados(x, out, prof + 1);
+    return out;
+  }
+  if (typeof v.id === "string" && v.timestamp && (v.from || v.to) && v.type) {
+    out.push(v);
+    return out;
+  }
+  for (const k of Object.keys(v)) mensajesAnidados(v[k], out, prof + 1);
+  return out;
 }
 
 /** Lee un lead de formulario instantáneo (Graph API) y lo aplana. */

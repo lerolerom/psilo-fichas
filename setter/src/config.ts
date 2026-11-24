@@ -32,11 +32,28 @@ const Env = z.object({
   DUENO_POR_DEFECTO: z.enum(["MARIO", "DANI", "VERO"]).default("MARIO"),
   PRESENTACION_MARIO: z.string().default("Mario"),
   PRESENTACION_DANI: z.string().default(""), // vacío = pendiente de Mario: se escala el primer mensaje
-  VIDEO_EDUCATIVO_URL: z.string().default(""),
+  // Material y datos del negocio (manual, sección 4 y 5). Los datos bancarios NO van en el código.
+  VIDEO_EDUCATIVO_URL: z.string().default("https://youtu.be/cuMOrmOdzIU"),
+  TESTIMONIOS_URL: z.string().default("https://youtube.com/playlist?list=PLi-B534urCtaEamepwTBLf7-zsGvprNho"),
+  FORMULARIO_EVALUACION_URL: z.string().default("https://forms.gle/wwHVNHk3GUw1B2Sg6"),
+  DATOS_TRANSFERENCIA: z.string().default(""), // líneas separadas por "|": Banco: ...|Ahorros: ...|Titular: ...|CI: ...|Mail: ...
+  DIRECCION_CUMBAYA: z.string().default(""),
+  MAPS_URL: z.string().default(""),
+  TELEFONO_DANIELA: z.string().default(""), // para la derivación a terapia con Daniela (lista Terapia Dani)
+  DURACION_EVALUACION_MIN: z.coerce.number().default(45),
+  // Horarios (decisiones de Mario del 20 al 23 nov 2026)
+  VENTANA_SEGUIMIENTOS: z.string().default("08:00-09:30"), // vacío = sin ventana; en ella no se contestan mensajes
+  FRANJA_VERO: z.string().default("15:00-17:00"), // lunes a viernes; vacío = sin franja
+  FRANJA_VERO_ESPERA_MIN: z.coerce.number().default(15),
+  HORA_REPORTE_DIARIO: z.string().default("07:50"),
+  AVISOS_INMEDIATOS: z.string().default("riesgo,reclamo,caliente,identidad"),
   DEBOUNCE_SEGUNDOS: z.coerce.number().default(90),
   HUMANO_SILENCIO_HORAS: z.coerce.number().default(12),
-  HORA_INICIO_ENVIO: z.coerce.number().default(8),
-  HORA_FIN_ENVIO: z.coerce.number().default(21),
+  // Respuestas: 24 horas (Mario prefiere contestar también de noche). Seguimientos: 08:00 a 21:59.
+  HORA_INICIO_ENVIO: z.coerce.number().default(0),
+  HORA_FIN_ENVIO: z.coerce.number().default(24),
+  HORA_INICIO_SEGUIMIENTO: z.coerce.number().default(8),
+  HORA_FIN_SEGUIMIENTO: z.coerce.number().default(22),
   FERIADOS: z.string().default(""), // YYYY-MM-DD separados por coma
   MAX_MENSAJES_HORA: z.coerce.number().default(60),
   ADMIN_API_TOKEN: z.string().default(""),
@@ -46,6 +63,11 @@ const Env = z.object({
   PLANTILLA_ALERTA: z.string().default("alerta_setter"),
   PLANTILLA_PRIMER_CONTACTO: z.string().default("primer_contacto_formulario"),
   PLANTILLA_PRIMER_CONTACTO_SIN_RESPUESTA: z.string().default("primer_contacto_sin_respuesta"),
+  PLANTILLA_ABANDONADO: z.string().default("primer_contacto_abandonado"),
+  PLANTILLA_RECORDATORIO_EVALUACION: z.string().default("recordatorio_evaluacion"),
+  PLANTILLA_RECONEXION_1: z.string().default("reconexion_1"),
+  PLANTILLA_RECONEXION_2: z.string().default("reconexion_2"),
+  PLANTILLA_RECONEXION_3: z.string().default("reconexion_3"),
   // Listas separadas por coma: se rotan en cada toque.
   PLANTILLA_SEGUIMIENTO_CONTACTADO: z.string().default("seguimiento_contactado_1,seguimiento_contactado_2"),
   PLANTILLA_SEGUIMIENTO_CONVERSANDO: z.string().default("seguimiento_conversando_1,seguimiento_conversando_2"),
@@ -63,7 +85,17 @@ export const config = {
   adminNumeros: lista(env.ADMIN_NUMEROS).map(normalizarTelefono),
   notificarA: lista(env.NOTIFICAR_A || env.ADMIN_NUMEROS).map(normalizarTelefono),
   feriados: new Set(lista(env.FERIADOS)),
+  avisosInmediatos: new Set(lista(env.AVISOS_INMEDIATOS)),
+  ventanaSeguimientos: rango(env.VENTANA_SEGUIMIENTOS),
+  franjaVero: rango(env.FRANJA_VERO),
 };
+
+/** "08:00-09:30" -> minutos desde medianoche [480, 570]. Vacío -> null. */
+export function rango(v: string): [number, number] | null {
+  const m = v.trim().match(/^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  return [Number(m[1]) * 60 + Number(m[2]), Number(m[3]) * 60 + Number(m[4])];
+}
 
 export type Config = typeof config;
 

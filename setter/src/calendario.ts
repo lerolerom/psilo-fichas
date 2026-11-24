@@ -47,10 +47,22 @@ export class GoogleCalendario implements Calendario {
     return `${fecha}: ocupado ${busy.map((b) => `${hhmm(b.start)}-${hhmm(b.end)}`).join(", ")}. Lo demás entre 08:00 y 19:00 está libre.`;
   }
 
-  /** Crea la evaluación con recordatorio el día anterior y el mismo día. */
-  async crearEvaluacion(inicioIso: string, titulo: string, descripcion: string): Promise<string> {
+  /** ¿El bloque [inicio, inicio+min) está libre en el calendario principal? */
+  async libre(inicioIso: string, minutos: number): Promise<boolean> {
     const inicio = new Date(inicioIso);
-    const fin = new Date(inicio.getTime() + 60 * 60_000);
+    const fin = new Date(inicio.getTime() + minutos * 60_000);
+    const data = await this.api("freeBusy", {
+      method: "POST",
+      body: { timeMin: inicio.toISOString(), timeMax: fin.toISOString(), timeZone: this.tz, items: [{ id: this.calendarId }] },
+    });
+    const busy: unknown[] = data.calendars?.[this.calendarId]?.busy ?? [];
+    return busy.length === 0;
+  }
+
+  /** "Sesión de evaluación con [nombre]", recordatorio el día anterior y el mismo día a las 08:00. */
+  async crearEvaluacion(inicioIso: string, titulo: string, descripcion: string, minutos = 45): Promise<string> {
+    const inicio = new Date(inicioIso);
+    const fin = new Date(inicio.getTime() + minutos * 60_000);
     const ev = await this.api(`calendars/${encodeURIComponent(this.calendarId)}/events`, {
       method: "POST",
       body: {
@@ -62,7 +74,7 @@ export class GoogleCalendario implements Calendario {
           useDefault: false,
           overrides: [
             { method: "popup", minutes: 24 * 60 },
-            { method: "popup", minutes: 120 },
+            { method: "popup", minutes: 60 },
           ],
         },
       },
@@ -74,6 +86,6 @@ export class GoogleCalendario implements Calendario {
 /** Sin calendario configurado: el agente sabe que debe escalar. */
 export class SinCalendario implements Calendario {
   async ocupado(fecha: string): Promise<string> {
-    return `Calendario no conectado. No confirmes ${fecha}: pon paso "comprometido" y escala a Mario con categoria "pago" para que él confirme la hora.`;
+    return `Calendario no conectado: no puedo ver la agenda del ${fecha}. Puedes usar enviar_datos_pago igual: Mario revisa la hora antes de confirmar.`;
   }
 }
