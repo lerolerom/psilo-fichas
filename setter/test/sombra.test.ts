@@ -23,10 +23,12 @@ describe("modo sombra", () => {
     expect(filas[0].real[0].texto).toContain("Hace cuánto te separaste");
   });
 
-  it("riesgo en sombra: no envía nada, queda registrado lo que habría hecho", async () => {
+  it("riesgo en sombra: nada al lead, alerta inmediata a Mario y queda registrado", async () => {
     const t = montar({ env: { MODO: "sombra" } });
     await t.entrante(LEAD, "ya no quiero vivir", "w1");
-    expect(t.enviados).toHaveLength(0);
+    expect(t.alLead(LEAD)).toHaveLength(0);
+    expect(t.aMario()).toHaveLength(1);
+    expect(t.aMario()[0].texto).toContain("URGENTE (sistema nuevo, modo sombra)");
     const filas = t.motor.comparacionSombra(new Date(t.ahora.getTime() - MIN), new Date(t.ahora.getTime() + MIN));
     expect(filas[0].modo).toBe("riesgo");
     expect(filas[0].propuesta[0]).toContain("171 opción 6");

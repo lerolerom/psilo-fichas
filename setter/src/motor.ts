@@ -217,6 +217,11 @@ export class Motor {
         contexto_hasta: ev.ts.toISOString(),
       });
       this.store.actualizar(ev.de, cambios);
+      // Decisión de Mario (24 nov 2026): en sombra también recibe la alerta inmediata (nada se envía al lead).
+      await this.notificar(
+        `URGENTE (sistema nuevo, modo sombra): +${ev.de}${lead.nombre ? ` (${lead.nombre})` : ""} escribió${ev.clase === "audio" ? " en un audio" : ""}: "${resumir(texto)}". ` +
+          `${riesgo === "alto" ? "Posible riesgo de autolesión" : "Señal ambigua de riesgo"}. El sistema nuevo no le envió nada: confirma que tú o la ronda lo atendieron.`,
+      );
       return;
     }
     if (riesgo) {
