@@ -35,7 +35,6 @@ const calendario =
 
 const agente = new AgenteSetter(
   new Anthropic(),
-  { modelo: config.CLAUDE_MODEL, effort: config.CLAUDE_EFFORT },
   calendario ?? new SinCalendario(),
   config.DURACION_EVALUACION_MIN,
 );

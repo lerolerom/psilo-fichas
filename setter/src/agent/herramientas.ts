@@ -140,6 +140,18 @@ export const HERRAMIENTAS: Anthropic.Beta.BetaTool[] = [
     },
   },
   {
+    name: "pedir_modelo_superior",
+    description:
+      "Pide que un modelo con más capacidad decida este turno. Úsalo si el caso es delicado o ambiguo y no estás seguro de responder bien: varias preguntas o temas a la vez, una objeción difícil, dudas sobre el precio, el reflejo del dolor, un lead molesto o una situación que el manual no cubre con claridad. No lo uses para lo rutinario.",
+    strict: true,
+    input_schema: {
+      type: "object",
+      properties: { motivo: { type: "string" } },
+      required: ["motivo"],
+      additionalProperties: false,
+    },
+  },
+  {
     name: "no_responder",
     description: "No enviar nada en este turno (por ejemplo, el lead solo agradeció un cierre).",
     strict: true,
@@ -178,6 +190,7 @@ export const Entradas = {
   }),
   registrar_comprobante: z.object({ evidencia: z.string() }),
   no_responder: z.object({ motivo: z.string() }),
+  pedir_modelo_superior: z.object({ motivo: z.string() }),
 } as const;
 
 export type NombreHerramienta = keyof typeof Entradas;

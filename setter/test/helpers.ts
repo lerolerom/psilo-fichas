@@ -31,6 +31,7 @@ export function montar(
 ) {
   const enviados: { to: string; texto: string; plantilla?: string }[] = [];
   const entradas: EntradaAgente[] = [];
+  const modelos: string[] = [];
   const escribiendo: string[] = [];
   let id = 0;
   const wa: WhatsApp = {
@@ -52,9 +53,11 @@ export function montar(
   };
   const cola = [...(opts.decisiones ?? [])];
   const agente = {
-    async decidir(e: EntradaAgente) {
+    async decidir(e: EntradaAgente, nivel?: { modelo: string }) {
       entradas.push(e);
-      return cola.shift() ?? decision({ noResponder: "sin guion" });
+      if (nivel) modelos.push(nivel.modelo);
+      const d = cola.shift() ?? decision({ noResponder: "sin guion" });
+      return { ...d, modelo: nivel?.modelo ?? null, uso: d.uso ?? (nivel ? { modelo: nivel.modelo, entrada: 1000, salida: 200, cacheLectura: 8000, cacheEscritura: 0, usd: 0.01 } : null) };
     },
   } as unknown as AgenteSetter;
 
@@ -86,6 +89,7 @@ export function montar(
     motor,
     enviados,
     entradas,
+    modelos,
     escribiendo,
     cola,
     alLead: (tel: string) => enviados.filter((e) => e.to === tel),

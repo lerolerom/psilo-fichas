@@ -167,6 +167,18 @@ CREATE TABLE IF NOT EXISTS escalaciones (
   creado TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS kv (clave TEXT PRIMARY KEY, valor TEXT);
+CREATE TABLE IF NOT EXISTS costos (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL,
+  telefono TEXT,
+  modelo TEXT NOT NULL,
+  motivo TEXT,
+  entrada INTEGER NOT NULL,
+  salida INTEGER NOT NULL,
+  cache_lectura INTEGER NOT NULL,
+  cache_escritura INTEGER NOT NULL,
+  usd REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS sombra (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   telefono TEXT NOT NULL,
@@ -280,6 +292,21 @@ export class Store {
     const set = claves.map((k) => `${k} = @${k}`).join(", ");
     this.db.prepare(`UPDATE leads SET ${set} WHERE telefono = @telefono`).run({ ...cambios, telefono });
     if (anterior && cambios.etapa && anterior !== cambios.etapa) this.onCambioEtapa!(telefono, anterior, cambios.etapa);
+  }
+
+  // ---------- costos de Claude ----------
+  registrarCosto(c: { ts: string; telefono: string | null; modelo: string; motivo: string; entrada: number; salida: number; cacheLectura: number; cacheEscritura: number; usd: number }): void {
+    this.db
+      .prepare(
+        "INSERT INTO costos (ts, telefono, modelo, motivo, entrada, salida, cache_lectura, cache_escritura, usd) VALUES (@ts, @telefono, @modelo, @motivo, @entrada, @salida, @cacheLectura, @cacheEscritura, @usd)",
+      )
+      .run(c);
+  }
+
+  costoEntre(desde: Date, hasta: Date): { modelo: string; turnos: number; usd: number }[] {
+    return this.db
+      .prepare("SELECT modelo, COUNT(*) AS turnos, SUM(usd) AS usd FROM costos WHERE ts >= ? AND ts < ? GROUP BY modelo ORDER BY usd DESC")
+      .all(desde.toISOString(), hasta.toISOString()) as { modelo: string; turnos: number; usd: number }[];
   }
 
   // ---------- modo sombra ----------

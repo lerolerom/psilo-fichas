@@ -137,11 +137,12 @@ describe("revisión de Fable", () => {
     expect(t.motor.validarCita(LEAD, "2026-11-26T16:00")).toBeNull();
   });
 
-  it("13. si el agente no decide nada, el caso pasa a Mario", async () => {
-    const t = montar({ decisiones: [decision({})] });
+  it("13. si ningún nivel decide nada, el caso pasa a Mario (antes lo intentan Sonnet y Opus)", async () => {
+    const t = montar({ decisiones: [decision({}), decision({}), decision({})] });
     await t.entrante(LEAD, "hola", "w1");
     t.avanzar(11 * MIN);
     await t.motor.tick();
+    expect(t.modelos).toEqual(["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5"]);
     expect(t.store.escalacionesPendientes()[0].motivo).toContain("no logró decidir");
   });
 

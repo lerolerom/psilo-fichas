@@ -23,7 +23,7 @@ export function htmlComparacion(fecha: string, filas: FilaComparacion[]): string
     ? filas
         .map(
           (f) => `<section class="fila">
-  <div class="cab"><strong>+${esc(f.telefono)}</strong>${f.nombre ? `<span>${esc(f.nombre)}</span>` : ""}<span class="chip">${esc(f.modo)}</span>${f.etapa ? `<span class="chip">etapa: ${esc(f.etapa)}</span>` : ""}${f.minutosReal != null ? `<span class="chip">real: ${f.minutosReal} min</span>` : ""}${f.minutosAgente != null ? `<span class="chip">agente: ~${f.minutosAgente} min</span>` : ""}</div>
+  <div class="cab"><strong>+${esc(f.telefono)}</strong>${f.nombre ? `<span>${esc(f.nombre)}</span>` : ""}<span class="chip">${esc(f.modo)}</span>${f.etapa ? `<span class="chip">etapa: ${esc(f.etapa)}</span>` : ""}${f.minutosReal != null ? `<span class="chip">real: ${f.minutosReal} min</span>` : ""}${f.minutosAgente != null ? `<span class="chip">agente: ~${f.minutosAgente} min</span>` : ""}${f.modelo ? `<span class="chip">${esc(f.modelo.replace("claude-", ""))}</span>` : ""}</div>
   <div class="cols">
     <div class="col"><h3>Lead</h3>${f.lead.map((t) => `<div class="burbuja">${esc(t)}</div>`).join("") || '<div class="vacio">(seguimiento: el lead no escribió)</div>'}</div>
     <div class="col agente"><h3>Habría enviado el agente</h3>${f.propuesta.map((t) => `<div class="burbuja">${esc(t)}</div>`).join("") || '<div class="vacio">(nada)</div>'}${f.accion ? `<div class="accion">${esc(f.accion)}</div>` : ""}</div>

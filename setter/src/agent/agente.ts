@@ -3,6 +3,16 @@ import { MANUAL_SETTER } from "./manual.js";
 import { CATEGORIAS, Entradas, HERRAMIENTAS, type NombreHerramienta } from "./herramientas.js";
 import { revisarMensaje, type EstadoRevision } from "./revision.js";
 import { ETAPAS, type Etapa, type Paso, type TIPOS_ENVIO } from "../db.js";
+import { aceptaFallback, costo, type Uso } from "./precios.js";
+
+export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
+
+/** Nivel de inteligencia de un turno: qué modelo decide y si puede pedir uno superior. */
+export interface Nivel {
+  modelo: string;
+  effort: Effort;
+  puedeSubir: boolean;
+}
 
 export interface MensajeSaliente {
   texto: string;
@@ -27,6 +37,10 @@ export interface Decision {
   comprobante: string | null;
   noResponder: string | null;
   rechazo: boolean; // el modelo se negó (stop_reason refusal)
+  subir: string | null; // el modelo pidió que decida uno superior (motivo)
+  fallosRevision: number; // mensajes devueltos por la revisión antes de salir bien
+  modelo: string | null;
+  uso: Uso | null;
 }
 
 export interface Calendario {
@@ -59,19 +73,29 @@ export function decisionVacia(): Decision {
     comprobante: null,
     noResponder: null,
     rechazo: false,
+    subir: null,
+    fallosRevision: 0,
+    modelo: null,
+    uso: null,
   };
 }
 
 export class AgenteSetter {
   constructor(
     private client: Anthropic,
-    private opts: { modelo: string; effort: "low" | "medium" | "high" | "xhigh" | "max" },
     private calendario: Calendario,
     private duracionEvaluacion = 45,
   ) {}
 
-  async decidir(entrada: EntradaAgente): Promise<Decision> {
+  async decidir(entrada: EntradaAgente, nivel: Nivel): Promise<Decision> {
     const d = decisionVacia();
+    d.modelo = nivel.modelo;
+    const uso = { entrada: 0, salida: 0, cacheLectura: 0, cacheEscritura: 0 };
+    const cerrar = () => {
+      d.uso = { modelo: nivel.modelo, ...uso, usd: costo(nivel.modelo, uso) };
+      return d;
+    };
+    const herramientas = nivel.puedeSubir ? HERRAMIENTAS : HERRAMIENTAS.filter((h) => h.name !== "pedir_modelo_superior");
     const estado = { ...entrada.estado };
     let fallosIdentidad = 0;
 
@@ -91,34 +115,39 @@ export class AgenteSetter {
 
     for (let i = 0; i < MAX_ITERACIONES; i++) {
       const res = await this.client.beta.messages.create({
-        model: this.opts.modelo,
+        model: nivel.modelo,
         max_tokens: 16000,
-        betas: ["server-side-fallback-2026-07-01"],
-        fallbacks: "default",
-        output_config: { effort: this.opts.effort },
-        system: [{ type: "text", text: MANUAL_SETTER, cache_control: { type: "ephemeral" } }],
-        tools: HERRAMIENTAS,
+        ...(aceptaFallback(nivel.modelo) ? { betas: ["server-side-fallback-2026-07-01"], fallbacks: "default" as const } : {}),
+        output_config: { effort: nivel.effort },
+        // El manual (y las herramientas, que van antes) quedan en caché 1 hora: los mensajes llegan espaciados.
+        system: [{ type: "text", text: MANUAL_SETTER, cache_control: { type: "ephemeral", ttl: "1h" } }],
+        tools: herramientas,
         messages,
       });
+      uso.entrada += res.usage.input_tokens ?? 0;
+      uso.salida += res.usage.output_tokens ?? 0;
+      uso.cacheLectura += res.usage.cache_read_input_tokens ?? 0;
+      uso.cacheEscritura += res.usage.cache_creation_input_tokens ?? 0;
 
       if (res.stop_reason === "refusal") {
         d.rechazo = true;
-        return d;
+        return cerrar();
       }
       if (res.stop_reason === "pause_turn") {
         messages.push({ role: "assistant", content: res.content });
         continue;
       }
 
-      const usos = res.content.filter((b): b is Anthropic.Beta.BetaToolUseBlock => b.type === "tool_use");
-      if (usos.length === 0 || res.stop_reason !== "tool_use") break;
+      const llamadas = res.content.filter((b): b is Anthropic.Beta.BetaToolUseBlock => b.type === "tool_use");
+      if (llamadas.length === 0 || res.stop_reason !== "tool_use") break;
 
       messages.push({ role: "assistant", content: res.content });
       const resultados: Anthropic.Beta.BetaToolResultBlockParam[] = [];
-      for (const uso of usos) {
-        const out = await this.ejecutar(uso.name as NombreHerramienta, uso.input, d, estado, entrada.validarCita);
+      for (const ll of llamadas) {
+        const out = await this.ejecutar(ll.name as NombreHerramienta, ll.input, d, estado, entrada.validarCita, nivel.puedeSubir);
         if (out.identidad) fallosIdentidad++;
-        resultados.push({ type: "tool_result", tool_use_id: uso.id, content: out.texto, is_error: out.error });
+        if (out.error && ll.name === "enviar_mensaje") d.fallosRevision++;
+        resultados.push({ type: "tool_result", tool_use_id: ll.id, content: out.texto, is_error: out.error });
       }
       messages.push({ role: "user", content: resultados });
 
@@ -131,12 +160,12 @@ export class AgenteSetter {
           propuesta: "",
           enviarTambien: false,
         };
-        return d;
+        return cerrar();
       }
       // Turno terminado de forma explícita: no hace falta otra vuelta al modelo.
-      if (d.noResponder || (d.escalacion && !d.escalacion.enviarTambien) || d.comprobante) break;
+      if (d.subir || d.noResponder || (d.escalacion && !d.escalacion.enviarTambien) || d.comprobante) break;
     }
-    return d;
+    return cerrar();
   }
 
   private async ejecutar(
@@ -145,6 +174,7 @@ export class AgenteSetter {
     d: Decision,
     estado: EstadoRevision,
     validarCita?: (fechaHora: string) => string | null,
+    puedeSubir = false,
   ): Promise<{ texto: string; error?: boolean; identidad?: boolean }> {
     const esquema = Entradas[nombre];
     if (!esquema) return { texto: `Herramienta desconocida: ${nombre}`, error: true };
@@ -235,6 +265,11 @@ export class AgenteSetter {
       case "no_responder":
         d.noResponder = v.motivo;
         return { texto: "Entendido, no se envía nada." };
+      case "pedir_modelo_superior":
+        if (!puedeSubir) return { texto: "Ya estás en el nivel más alto: decide tú.", error: true };
+        // Lo que se decidió hasta aquí se descarta: el modelo superior decide el turno completo.
+        d.subir = v.motivo;
+        return { texto: "Un modelo superior va a decidir este turno. No hagas nada más." };
     }
   }
 }

@@ -41,7 +41,7 @@ const cfg = {
   adminNumeros: config.adminNumeros.length ? config.adminNumeros : ["593000000000"],
 };
 const store = new Store(":memory:");
-const agente = new AgenteSetter(new Anthropic(), { modelo: cfg.CLAUDE_MODEL, effort: cfg.CLAUDE_EFFORT }, new SinCalendario());
+const agente = new AgenteSetter(new Anthropic(), new SinCalendario());
 let desfase = 0;
 const reloj = () => new Date(Date.now() + desfase);
 const motor = new Motor(cfg, store, wa, agente, null, { reloj, dormir: async () => {} });

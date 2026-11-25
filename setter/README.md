@@ -6,6 +6,18 @@ Agente que atiende leads por WhatsApp siguiendo el **Manual del Setter para IA (
 
 El sistema arranca en **modo sombra** (`MODO=sombra`): el número se conecta a la API por coexistencia, las rondas de Chrome y Mario siguen trabajando como hoy, y el agente recibe cada mensaje real, decide qué haría y **no envía nada**. Cada mañana el reporte diario trae el resumen y un enlace al panel `/panel/sombra`, con tres columnas por momento: lo que escribió el lead, lo que habría enviado el agente (o a quién lo habría escalado) y lo que se envió de verdad. Cuando las propuestas sean iguales o mejores durante una o dos semanas, se apagan las rondas de respuesta y se cambia a `MODO=hibrido`. En sombra tampoco se envían etapas a Meta.
 
+## Inteligencia escalonada y costo
+
+Cada turno empieza en el nivel que pide el momento y sube solo si hace falta:
+
+| Nivel | Modelo | Cuándo |
+|---|---|---|
+| 1 | Claude Haiku 5.5 | Exploración del dolor, seguimientos, recordatorios, cierres |
+| 2 | Claude Sonnet 5.5 | Precio, proceso, objeciones, medicación, pagos y comprobantes, mensajes largos, el reflejo del dolor, leads que ya recibieron la oferta; o cuando Haiku pide ayuda |
+| 3 | Claude Opus 5 | Cuando Sonnet no logra un mensaje que pase la revisión, se niega o no decide |
+
+Si ningún nivel logra decidir, el caso pasa a Mario. El manual queda en caché una hora para abaratar cada llamada. El reporte diario trae el costo de ayer por modelo y el acumulado del mes. Con `PRESUPUESTO_MENSUAL_USD` (45 por defecto) el sistema usa solo Haiku al llegar al tope y avisa a Mario una vez; nunca deja de contestar. Estimado con el volumen de la bitácora (2.000 a 3.000 decisiones al mes): USD 20 a 45 en Claude, más unos USD 10 de servidor y 5 a 20 de WhatsApp.
+
 ## Que Meta aprenda (API de Conversiones)
 
 Cada cambio de etapa (Qualified, Agendó, Converted, Lost, Not qualified) se envía a Meta en el momento: para leads de formulario instantáneo con su ID de lead (como el Leads Center), y para los que llegaron por un anuncio que abre WhatsApp con el identificador del clic (`ctwa_clid`) del primer mensaje. Así Meta optimiza hacia leads que califican sin cambiar etapas a mano. Requiere `META_DATASET_ID` y `META_CAPI_TOKEN` del Administrador de eventos. Verificar en la documentación de Meta los nombres de eventos para mensajería antes de activarlo.
@@ -59,7 +71,7 @@ Lo que la auditora del sistema anterior encontraba después, aquí se bloquea an
 
 ```bash
 npm install
-npm test                                   # 68 pruebas: casos reales de la bitácora y de la revisión de código
+npm test                                   # 74 pruebas: casos reales de la bitácora y de la revisión de código
 ANTHROPIC_API_KEY=... npm run simular -- --nombre Ana --formulario "Tengo ansiedad hace años"
 ```
 

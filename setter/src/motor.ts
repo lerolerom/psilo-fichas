@@ -5,7 +5,7 @@ import { normalizarTelefono } from "./config.js";
 import type { Dueno, Escalacion, Lead, Mensaje, Store } from "./db.js";
 import { ETAPAS } from "./db.js";
 import type { EventoWA, WhatsApp } from "./whatsapp.js";
-import type { AgenteSetter, Decision } from "./agent/agente.js";
+import type { AgenteSetter, Decision, EntradaAgente, Nivel } from "./agent/agente.js";
 import { etapaFinal } from "./agent/agente.js";
 import { armarContexto, hechos } from "./contexto.js";
 import { detectarRiesgo, mensajeContencion } from "./riesgo.js";
@@ -56,6 +56,7 @@ export interface FilaComparacion {
   real: { quien: string; texto: string }[]; // lo que se envió de verdad (rondas, Mario)
   minutosReal: number | null; // cuánto tardó la respuesta real
   minutosAgente: number | null; // cuánto habría tardado el agente (con la lectura configurada)
+  modelo: string | null; // qué nivel decidió
 }
 
 type Entrante = Extract<EventoWA, { tipo: "entrante" }>;
@@ -512,7 +513,7 @@ export class Motor {
     const ultimoIdAntes = this.ultimoIdMensaje(tel);
     // Un seguimiento cuenta como toque aunque el agente decida no enviar nada (si no, se reintentaría en cada ciclo).
     if (modo === "seguimiento") this.avanzarToque(tel, ahora);
-    const d = await this.agente.decidir({
+    const d = await this.decidirEscalonado(tel, lead, mensajes, modo, {
       texto,
       adjuntos,
       estado: { chatNuevo: h.chatNuevo, preguntasProfundizar: lead.preguntas_profundizar, precioEvaluacionDado: h.precioEvaluacionDado },
@@ -550,6 +551,73 @@ export class Motor {
     }
     if (opciones?.destino === "chrome") return this.dejarParaChrome(lead, d, ahora);
     await this.aplicar(lead, d, modo, respondeA);
+  }
+
+  // =====================================================================
+  // Inteligencia escalonada: Haiku, luego Sonnet, luego Opus, con tope mensual de gasto
+  // =====================================================================
+
+  private niveles(): Nivel[] {
+    return [
+      { modelo: this.cfg.MODELO_BASICO, effort: this.cfg.EFFORT_BASICO, puedeSubir: true },
+      { modelo: this.cfg.MODELO_MEDIO, effort: this.cfg.EFFORT_MEDIO, puedeSubir: true },
+      { modelo: this.cfg.MODELO_SUPERIOR, effort: this.cfg.EFFORT_SUPERIOR, puedeSubir: false },
+    ];
+  }
+
+  /**
+   * Nivel con el que empieza el turno. Sonnet para los momentos que deciden la venta o piden más tacto:
+   * precio, proceso, objeciones, medicación, pagos y comprobantes, mensajes largos, el reflejo del dolor
+   * y leads que ya recibieron la oferta. Lo demás (exploración, seguimientos, recordatorios), Haiku.
+   */
+  nivelInicial(lead: Lead, mensajes: Mensaje[], modo: Modo, adjuntos: number): number {
+    if (modo !== "respuesta") return ["ofrecido", "comprometido"].includes(lead.paso) ? 1 : 0;
+    const rafaga: string[] = [];
+    for (let i = mensajes.length - 1; i >= 0 && mensajes[i].direccion === "in"; i--) rafaga.unshift(mensajes[i].texto);
+    const texto = rafaga.join(" ");
+    const sensible =
+      /precio|cu[aá]nto (cuesta|vale|sale|es)|costo|valor|inversi[oó]n|proceso|c[oó]mo funciona|segur[oa]|miedo|caro|pensarlo|dinero|plata|pagar|pago|transfer|comprobante|beca|legal|medica|pastilla|antidepresiv|psiqui|diagn[oó]stic|bipolar|litio|evaluaci[oó]n|agendar|cita|no gracias|no me interesa|molest|robot|\bbot\b|persona real|\bia\b|inteligencia artificial/i;
+    if (adjuntos > 0 || sensible.test(texto) || texto.length > 500) return 1;
+    if (lead.preguntas_profundizar >= 2 && !lead.reflejo_enviado) return 1; // toca el reflejo
+    if (["ofrecido", "comprometido"].includes(lead.paso)) return 1;
+    return 0;
+  }
+
+  private gastoDelMes(ahora: Date): number {
+    const { fecha } = partesLocales(ahora, this.cfg.TZ_NEGOCIO);
+    const inicio = new Date(`${fecha.slice(0, 7)}-01T00:00:00-05:00`);
+    return this.store.costoEntre(inicio, new Date(ahora.getTime() + 1)).reduce((a, c) => a + c.usd, 0);
+  }
+
+  private async decidirEscalonado(tel: string, lead: Lead, mensajes: Mensaje[], modo: Modo, entrada: EntradaAgente): Promise<Decision> {
+    const ahora = this.reloj();
+    const niveles = this.niveles();
+    let tope = niveles.length - 1;
+    const gasto = this.gastoDelMes(ahora);
+    if (gasto >= this.cfg.PRESUPUESTO_MENSUAL_USD) {
+      tope = 0; // al llegar al presupuesto, solo el modelo básico (nunca deja de contestar)
+      const clave = `aviso_presupuesto_${partesLocales(ahora, this.cfg.TZ_NEGOCIO).fecha.slice(0, 7)}`;
+      if (!this.store.kv(clave)) {
+        this.store.setKv(clave, "1");
+        await this.notificar(
+          `El agente llegó al presupuesto del mes en Claude (USD ${gasto.toFixed(2)} de ${this.cfg.PRESUPUESTO_MENSUAL_USD}). Desde ahora usa solo ${this.cfg.MODELO_BASICO} hasta fin de mes. Puedes subir PRESUPUESTO_MENSUAL_USD si hace falta.`,
+        );
+      }
+    }
+    let i = Math.min(this.nivelInicial(lead, mensajes, modo, entrada.adjuntos.length), tope);
+    for (;;) {
+      const nivel = { ...niveles[i], puedeSubir: i < tope };
+      const d = await this.agente.decidir(entrada, nivel);
+      if (d.uso) this.store.registrarCosto({ ts: this.reloj().toISOString(), telefono: tel, motivo: modo, ...d.uso });
+      const vacia = !d.mensajes.length && !d.escalacion && !d.noResponder && !d.datosPago && !d.comprobante;
+      const motivo = d.subir ?? (d.rechazo ? "rechazo" : d.fallosRevision >= 2 ? "revisión" : d.escalacion?.categoria === "identidad" ? "identidad" : modo === "respuesta" && vacia ? "sin decisión" : null);
+      if (!motivo || i >= tope) {
+        d.subir = null;
+        return d;
+      }
+      this.store.log(tel, "sube_nivel", `${nivel.modelo} a ${niveles[i + 1].modelo}: ${motivo}`);
+      i++;
+    }
   }
 
   private ultimoIdMensaje(tel: string): number {
@@ -1115,6 +1183,7 @@ export class Motor {
         real,
         minutosReal: primerReal ? Math.round((new Date(primerReal).getTime() - new Date(base).getTime()) / 60_000) : null,
         minutosAgente: s.ts_lead ? Math.round((this.cfg.LECTURA_MIN_MINUTOS + this.cfg.LECTURA_MAX_MINUTOS) / 2) : null,
+        modelo: d.modelo ?? null,
       });
     }
     return filas;
@@ -1163,6 +1232,7 @@ export class Motor {
       })
       .map((l) => `+${l.telefono} ${l.nombre ?? ""} ${formatoCita(l.cita!, tz)}, ${l.modalidad ?? ""}, ${l.pago_confirmado ? "pagada" : "SIN PAGO"}`);
     if (citas.length) lineas.push("", "Evaluaciones hoy y mañana:", ...citas);
+    lineas.push("", this.lineaCostos(inicioAyer, inicioHoy, ahora));
     lineas.push(
       "",
       `Ayer: ${nuevos} leads nuevos, ${enviados.length} mensajes enviados, ${respuestas.length} mensajes de leads, ${agendadas.n} evaluaciones agendadas.` +
@@ -1173,6 +1243,13 @@ export class Motor {
             : ""),
     );
     return lineas.join("\n");
+  }
+
+  private lineaCostos(desde: Date, hasta: Date, ahora: Date): string {
+    const ayer = this.store.costoEntre(desde, hasta);
+    const total = ayer.reduce((a, c) => a + c.usd, 0);
+    const detalle = ayer.map((c) => `${c.modelo.replace("claude-", "")} ${c.turnos} turnos $${c.usd.toFixed(2)}`).join(", ");
+    return `Claude ayer: USD ${total.toFixed(2)}${detalle ? ` (${detalle})` : ""}. En el mes: USD ${this.gastoDelMes(ahora).toFixed(2)} de ${this.cfg.PRESUPUESTO_MENSUAL_USD}.`;
   }
 
   private reporteSombra(ahora: Date): string {
@@ -1190,6 +1267,7 @@ export class Motor {
       `Modo sombra, ayer: el agente revisó ${filas.length} momentos sin enviar nada.`,
       `${respuestas.length} respuestas propuestas, ${escaladas} casos que habría dejado a Mario, ${filas.filter((f) => f.modo === "riesgo").length} alertas de riesgo.`,
       tiempos.length ? `Respuesta real (rondas o Mario): mediana ${tiempos[Math.floor(tiempos.length / 2)]} min, la más lenta ${tiempos.at(-1)} min. ${sinReal} mensajes de leads sin respuesta real.` : "",
+      this.lineaCostos(inicioAyer, inicioHoy, ahora),
       `Comparación lado a lado: ${enlace}`,
     ]
       .filter(Boolean)
