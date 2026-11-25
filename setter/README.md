@@ -14,7 +14,7 @@ Cada turno empieza en el nivel que pide el momento y sube solo si hace falta:
 |---|---|---|
 | 1 | Claude Haiku 5.5 | Exploración del dolor, seguimientos, recordatorios, cierres |
 | 2 | Claude Sonnet 5.5 | Precio, proceso, objeciones, medicación, pagos y comprobantes, mensajes largos, el reflejo del dolor, leads que ya recibieron la oferta; o cuando Haiku pide ayuda |
-| 3 | Claude Opus 5 | Cuando Sonnet no logra un mensaje que pase la revisión, se niega o no decide |
+| 3 | Claude Opus 5.5 | Cuando Sonnet no logra un mensaje que pase la revisión, se niega o no decide |
 
 Si ningún nivel logra decidir, el caso pasa a Mario. El manual queda en caché una hora para abaratar cada llamada. El reporte diario trae el costo de ayer por modelo y el acumulado del mes. Con `PRESUPUESTO_MENSUAL_USD` (45 por defecto) el sistema usa solo Haiku al llegar al tope y avisa a Mario una vez; nunca deja de contestar. Estimado con el volumen de la bitácora (2.000 a 3.000 decisiones al mes): USD 20 a 45 en Claude, más unos USD 10 de servidor y 5 a 20 de WhatsApp.
 

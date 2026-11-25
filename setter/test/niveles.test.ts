@@ -21,7 +21,7 @@ describe("inteligencia escalonada", () => {
     expect(t.modelos).toEqual(["claude-sonnet-5-5"]);
   });
 
-  it("si Haiku pide ayuda, decide Sonnet; si Sonnet no logra un mensaje válido, decide Opus 5", async () => {
+  it("si Haiku pide ayuda, decide Sonnet; si Sonnet no logra un mensaje válido, decide Opus 5.5", async () => {
     const t = montar({
       decisiones: [
         decision({ subir: "el lead mezcla duelo y dudas de precio" }),
@@ -32,7 +32,7 @@ describe("inteligencia escalonada", () => {
     await t.entrante(LEAD, "hola", "w1");
     t.avanzar(11 * MIN);
     await t.motor.tick();
-    expect(t.modelos).toEqual(["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5"]);
+    expect(t.modelos).toEqual(["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"]);
     expect(t.alLead(LEAD)).toHaveLength(1);
   });
 
@@ -63,7 +63,7 @@ describe("inteligencia escalonada", () => {
   it("precios: Haiku cuesta mucho menos que Opus por el mismo turno", () => {
     const u = { entrada: 4000, salida: 1000, cacheLectura: 8000, cacheEscritura: 0 };
     expect(costo("claude-haiku-5-5", u)).toBeLessThan(0.001);
-    expect(costo("claude-opus-5", u)).toBeGreaterThan(0.04);
+    expect(costo("claude-opus-5-5", u)).toBeGreaterThan(0.03);
   });
 });
 

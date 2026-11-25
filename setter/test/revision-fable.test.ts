@@ -142,7 +142,7 @@ describe("revisión de Fable", () => {
     await t.entrante(LEAD, "hola", "w1");
     t.avanzar(11 * MIN);
     await t.motor.tick();
-    expect(t.modelos).toEqual(["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5"]);
+    expect(t.modelos).toEqual(["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"]);
     expect(t.store.escalacionesPendientes()[0].motivo).toContain("no logró decidir");
   });
 

@@ -17,7 +17,7 @@ const Env = z.object({
   // delicados (precio, objeciones, reflejo, comprobantes) y Opus solo si un nivel inferior no lo resuelve.
   MODELO_BASICO: z.string().default("claude-haiku-5-5"),
   MODELO_MEDIO: z.string().default("claude-sonnet-5-5"),
-  MODELO_SUPERIOR: z.string().default("claude-opus-5"), // claude-opus-5-5 es más barato y más capaz
+  MODELO_SUPERIOR: z.string().default("claude-opus-5-5"),
   EFFORT_BASICO: z.enum(["low", "medium", "high", "xhigh", "max"]).default("medium"),
   EFFORT_MEDIO: z.enum(["low", "medium", "high", "xhigh", "max"]).default("medium"),
   EFFORT_SUPERIOR: z.enum(["low", "medium", "high", "xhigh", "max"]).default("high"),
